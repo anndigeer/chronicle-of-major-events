@@ -147,6 +147,27 @@ class TestJrjj(unittest.TestCase):
         self.assertEqual(records[0][1], 'https://www.jiujiang.gov.cn/zwzx/jrjj/202610/t20261019_1234567.html')
         self.assertEqual(records[1][2], '2026-10-18')
 
+    def test_government_real_reltime_overrides_date_in_url(self):
+        """Actual government XML uses RELTIME; September URL may be October news."""
+        xml = '''<?xml version="1.0" encoding="UTF-8"?>
+        <NEWS>
+          <ITEM>
+            <TITLE>前八个月我市经济运行总体平稳</TITLE>
+            <PUBURL>./202609/t20260930_7338368.html</PUBURL>
+            <RELTIME>2026-10-06</RELTIME>
+          </ITEM>
+          <ITEM>
+            <TITLE>陈云在九江调研</TITLE>
+            <PUBURL>./202609/t20260918_7310000.html</PUBURL>
+            <RELTIME>2026-09-18</RELTIME>
+          </ITEM>
+        </NEWS>'''
+        records = j.parse_gov_xml(xml)
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0][2], '2026-10-06')
+        self.assertEqual(records[1][2], '2026-09-18')
+        self.assertEqual(len([r for r in records if r[2].startswith('2026-09')]), 1)
+
     def test_jjxw_api_100_per_page_and_links(self):
         records=j.parse_jjxw_json(JJXW_JSON)
         self.assertEqual(len(records),2)

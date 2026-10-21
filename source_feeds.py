@@ -58,7 +58,7 @@ def parse_gov_xml(payload: str | bytes) -> list[tuple[str, str, str]]:
                       if fields.get(k)), '')
         title = re.sub(r'<[^>]+>', '', html.unescape(title)).strip()
         dt = next((fields[k] for k in
-                   ('PUBDATE', 'PUBTIME', 'PUBLISHDATE', 'PUBLISHTIME',
+                   ('RELTIME', 'PUBDATE', 'PUBTIME', 'PUBLISHDATE', 'PUBLISHTIME',
                     'DOCRELTIME', 'RELEASEDATE', 'DATE', 'CREATETIME')
                    if fields.get(k)), '')
         day = day_from_text(dt)
