@@ -44,6 +44,12 @@ HEADERS = ['新闻标题', '发布日期', '自动匹配', '命中姓名', '人�
 RE_DATE = re.compile(r'(20\d{2})[-年/.](1[0-2]|0?[1-9])[-月/.](3[01]|[12]\d|0?[1-9])(?:日)?(?!\d)')
 RE_ISO = re.compile(r'20\d{2}-\d{2}-\d{2}')
 RE_NAME = re.compile(r'^[\u4e00-\u9fff]{2,4}$')
+# Categories from the leaders portal are not personal names.
+NON_PERSON_LABELS = frozenset({
+    '人大', '省委', '省政府', '市委', '市政府', '政协', '法院', '检察院',
+    '政府', '党委', '党校', '公安', '公安局', '领导', '更多', '报道合集',
+    '省委书记', '省委常委', '人大常委', '领导分工', '更多内容', '查看更多',
+})
 INVALID_URL = re.compile(r'^(?:#|javascript:|mailto:|tel:)', re.I)
 CONTENT_SELECTORS = [
     '#artibody > div.trs_editor_view', '#artibody', '#zoom',
@@ -197,7 +203,7 @@ def next_page_urls(source: str, n: int) -> list[str]:
 def config_defaults() -> dict:
     return {
         'names': DEFAULT_NAMES,
-        'fetch_ifeng_names': True,
+        'fetch_ifeng_names': False,
         'include_body_matches': True,
         'max_pages': 170,
         'stop_after_known_pages': 3,
@@ -389,23 +395,27 @@ def extract_ifeng_names(html: str) -> list[str]:
     for block in blocks:
         for tag in block.select('h2, h3, h4, h5, h6, a, dt, strong'):
             candidate = norm_space(tag.get_text(' ', strip=True))
-            if RE_NAME.fullmatch(candidate) and candidate not in {'省委书记', '省委常委', '人大常委', '报道合集', '领导分工', '更多内容', '查看更多'}:
+            if RE_NAME.fullmatch(candidate) and candidate not in NON_PERSON_LABELS:
                 names.add(candidate)
     return sorted(names)
 
 
 def get_names(session: requests.Session, cfg: dict) -> list[str]:
+    """Only names explicitly approved in jrjj_config.json trigger inclusion.
+
+    The external leaders website also contains category labels, such as 人大
+    and 省委. Candidate names may be logged, but are never added silently.
+    """
     result = set(cfg['names'])
-    if cfg['fetch_ifeng_names']:
+    if cfg.get('fetch_ifeng_names', False):
         try:
-            dynamic = extract_ifeng_names(fetch_html(session, 'https://jx.ifeng.com/leaders/', cfg['timeout_seconds']))
-            if dynamic:
-                result.update(dynamic)
-                LOG.info('凤凰江西政要库解析 %d 人；合并后监测 %d 人', len(dynamic), len(result))
-            else:
-                LOG.warning('凤凰网页未识别到目标政要库，继续使用本地名单')
+            discovered = extract_ifeng_names(fetch_html(session, 'https://jx.ifeng.com/leaders/', cfg['timeout_seconds']))
+            suggestions = sorted(set(discovered) - result)
+            if suggestions:
+                LOG.info('外部政要库有 %d 个待确认姓名（未加入匹配）：%s',
+                         len(suggestions), '、'.join(suggestions))
         except Exception as exc:
-            LOG.warning('凤凰政要库获取失败（不会中断）：%s', exc)
+            LOG.warning('外部政要库访问失败（不影响配置的姓名匹配）：%s', exc)
     return sorted(result)
 
 
@@ -965,8 +975,8 @@ def main(argv=None) -> int:
         else:
             # Manual review workflow: do not rescan listings; fetch missing month/yellow article bodies.
             fetch_article_details(session, con, cfg, year, month, new, book, args.browser, 'month')
-            previous = con.execute("SELECT value FROM metadata WHERE key='last_names'").fetchone()
-            names = sorted(set(cfg['names']) | set(json.loads(previous['value']) if previous else []))
+            # Do not revive unapproved terms from previous metadata.
+            names = sorted(set(cfg['names']))
         selected = refresh_book(book, con, names, cfg)
         book.save(args.excel)
         LOG.info('Excel已更新：%s；自动检测名单 %d 人', args.excel, len(names))

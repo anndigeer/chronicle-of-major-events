@@ -98,6 +98,32 @@ class TestJrjj(unittest.TestCase):
                 empty, ok, _=j.fetch_list(session,'jjxw',1,j.config_defaults(),False,Path(folder),year=2026)
                 self.assertTrue(ok)
                 self.assertFalse(empty)
+    def test_unapproved_organization_terms_never_match(self):
+        """Regression: article about 廖奇志 was erroneously matched as 人大."""
+        page = ('<div class="part-c-l pull-left" data-name="jx_ld_zykl">'
+                '<h4>人大</h4><h4>省委</h4><h4>省政府</h4>'
+                '<h4>政协</h4><h4>法院</h4><h4>检察院</h4>'
+                '<h4>廖奇志</h4></div>')
+        self.assertEqual(j.extract_ifeng_names(page), ['廖奇志'])
+        cfg = {**j.config_defaults(), 'fetch_ifeng_names': True}
+        with patch.object(j, 'fetch_html', return_value=page):
+            names = j.get_names(j.build_session('test-agent'), cfg)
+        self.assertEqual(names, sorted(cfg['names']))
+        title = '市人大常委会党组理论学习中心组举行集体学习，廖奇志主持并讲话'
+        body = ('9月2日，市人大常委会党组理论学习中心组举行集体学习。'
+                '市人大常委会党组书记、主任廖奇志主持并讲话。'
+                '习近平党建思想深化了党对新时代管党治党的规律性认识。')
+        self.assertEqual(j.match_names(title, body, names, True), [])
+        self.assertEqual(j.match_names('陈云在九江调研', '', names, True), ['陈云'])
+
+    def test_names_only_from_config_by_default(self):
+        cfg = j.config_defaults()
+        self.assertFalse(cfg['fetch_ifeng_names'])
+        with patch.object(j, 'fetch_html', side_effect=AssertionError('should not fetch')) as fetch:
+            self.assertEqual(j.get_names(j.build_session('test-agent'), cfg),
+                             sorted(cfg['names']))
+            fetch.assert_not_called()
+
     def test_cli_help_with_cp1252_output(self):
         """Chinese argparse help must print even when inherited output is cp1252."""
         env = os.environ.copy()

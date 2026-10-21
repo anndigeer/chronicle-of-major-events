@@ -1,6 +1,6 @@
 {
   "names": ["陈云", "邓永翔", "黄强", "陈永奇", "庄兆林", "黄喜忠"],
-  "fetch_ifeng_names": true,
+  "fetch_ifeng_names": false,
   "include_body_matches": true,
   "max_pages": 170,
   "stop_after_known_pages": 3,
