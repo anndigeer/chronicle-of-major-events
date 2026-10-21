@@ -317,6 +317,82 @@ class TestJjxw(unittest.TestCase):
                 refresh()
                 self.assertEqual(cell.value, '2026-09-28')
 
+    def test_api_schema_change_does_not_look_like_last_page(self):
+        """Valid HTTP 200 with unexpected JSON must fail, never signal EOF."""
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            class Response:
+                content = b'{"success":true,"data":{"unknown_articles":[1,2]}}'
+                def raise_for_status(self):
+                    return None
+                def __enter__(self):
+                    return self
+                def __exit__(self, *args):
+                    return False
+
+            session = j.build_session('test-agent')
+            cfg = dict(j.config_defaults(), delay_seconds=0)
+            with patch.object(session, 'get', return_value=Response()):
+                articles, ok = j.fetch_list(session, 1, cfg, p)
+            self.assertFalse(ok)
+            self.assertFalse(articles)
+            self.assertIn('无法确认', (p / 'jjxw_feed_page_2.txt').read_text('utf-8'))
+            with patch.object(session, 'get', return_value=Response()):
+                with j.connect_db(p / 'cache.sqlite3') as con:
+                    state = {}
+                    j.crawl(session, con, {'jjxw': set()}, cfg, 2026, p,
+                            '2026-09', status=state)
+                    self.assertFalse(state['complete'])
+
+    def test_real_empty_page_still_stops_pagination(self):
+        self.assertTrue(j.is_confirmed_empty_feed(b'{"data":{"list":[]}}'))
+        self.assertTrue(j.is_confirmed_empty_feed(b'{"data":{"records":[]}}'))
+        self.assertFalse(j.is_confirmed_empty_feed(b'{"data":{"unknown":[]}}'))
+        self.assertFalse(j.is_confirmed_empty_feed(b'{"data":{"list":[{"id":4}]}}'))
+        class Response:
+            content = b'{"data":{"list":[]}}'
+            def raise_for_status(self):
+                return None
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(j.requests.Session, 'get', return_value=Response()):
+                news, ok = j.fetch_list(
+                    j.build_session('test'), 1,
+                    j.config_defaults(), Path(folder))
+            self.assertTrue(ok)
+            self.assertEqual(news, [])
+
+    def test_invalid_manual_event_date_blocks_export(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            cfg = dict(j.config_defaults(), names=['陈云'], delay_seconds=0)
+            url = 'https://www.jjxw.cn/article/2026/09/18/99001.html'
+            with j.connect_db(p / 'cache.sqlite3') as con:
+                con.execute(
+                    "INSERT INTO news(url,source,title,pub_date,body_json,status) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (url, 'jjxw', '陈云主持会议', '2026-09-18',
+                     json.dumps(['9月17日，陈云主持召开会议并部署重点工作。' * 6],
+                                ensure_ascii=False), '成功'))
+                book = j.open_book(p / 'news.xlsx')
+                ws = book.active
+                ws.cell(2, 1, '陈云主持会议').hyperlink = url
+                ws.cell(2, 2, '2026-09-18')
+                ws.cell(2, 5, '收录')
+                ws.cell(2, 7, url)
+                ws.cell(2, 9, '2026-09-31')
+                chosen = j.refresh_book(book, con, ['陈云'], cfg)
+                self.assertEqual(chosen, [])
+                self.assertEqual(ws.cell(2, 9).value, '2026-09-31')
+                self.assertIn('日期无效', ws.cell(2, 8).value)
+                ws.cell(2, 9, '2026-09-17')
+                chosen = j.refresh_book(book, con, ['陈云'], cfg)
+                self.assertEqual(len(chosen), 1)
+                self.assertEqual(chosen[0]['date'], '2026-09-17')
+
     def test_news_json_api(self):
         obj = {'data': {'list': [
             {'fileID': 190001, 'publishTime': '2026-09-18 10:00:00',

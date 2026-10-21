@@ -193,6 +193,28 @@ def parse_jjxw_json(payload: str | bytes | dict) -> list[tuple[str, str, str]]:
     return found
 
 
+def is_confirmed_empty_feed(payload: bytes | str | dict) -> bool:
+    """Only an explicitly empty API article array proves the end of pagination.
+
+    A 200 response with a changed JSON schema must be reported as an error,
+    not confused with an empty page; otherwise the exported month may be partial.
+    """
+    data = json.loads(payload) if isinstance(payload, (bytes, str)) else payload
+    if isinstance(data, list):
+        return not data
+    if not isinstance(data, dict):
+        return False
+    for container in (data, data.get('data'), data.get('result')):
+        if isinstance(container, list) and not container:
+            return True
+        if isinstance(container, dict):
+            for key in ('list', 'records', 'rows', 'items'):
+                if key in container and isinstance(container[key], list):
+                    if not container[key]:
+                        return True
+    return False
+
+
 def fetch_list(session: requests.Session, page: int, cfg: dict,
                debug_dir: Path) -> tuple[list[News], bool]:
     """Only 九江新闻网 JSON listing, 100 articles per page."""
@@ -203,11 +225,12 @@ def fetch_list(session: requests.Session, page: int, cfg: dict,
                          headers={'Accept': 'application/json,text/plain,*/*',
                                   'Referer': 'https://www.jjxw.cn/'}) as response:
             response.raise_for_status()
-            rows = parse_jjxw_json(response.content)
+            content = response.content
+            rows = parse_jjxw_json(content)
         if not rows:
-            if page:
+            if page and is_confirmed_empty_feed(content):
                 return [], True
-            raise ValueError('新闻网接口返回空列表或无法识别数据')
+            raise ValueError('新闻网接口未返回可识别的新闻；无法确认是否已翻页结束')
         LOG.info('新闻网 API 第%d页：%d条', page + 1, len(rows))
         return [News('jjxw', title, link, published)
                 for title, link, published in rows], True
@@ -679,7 +702,12 @@ def refresh_book(book, con: sqlite3.Connection, names: list[str], cfg: dict) -> 
             needs_manual_review = bool(
                 event_cell.comment and
                 event_cell.comment.text.startswith('MANUAL_EVENT_DATE_REVIEW'))
-            if not event_day and not needs_manual_review and n['status'] == '成功':
+            if needs_manual_review and event_day:
+                # A newly typed valid event date completes the manual review.
+                event_cell.comment = None
+                needs_manual_review = False
+            invalid_event = bool(norm_space(raw_event)) and not event_day
+            if not event_day and not needs_manual_review and not invalid_event and n['status'] == '成功':
                 inferred = infer_event_date(
                     n['article_title'] or n['title'], paras, n['pub_date'],
                     cfg['late_publication_days'])
@@ -690,7 +718,7 @@ def refresh_book(book, con: sqlite3.Connection, names: list[str], cfg: dict) -> 
                         auto_marker + inferred + '\n自动推断，请核实或直接修改单元格。',
                         '采集程序')
             effective_day = event_day or n['pub_date']
-            selected = choose == 'include' or (choose == 'auto' and bool(matches))
+            selected = not invalid_event and (choose == 'include' or (choose == 'auto' and bool(matches)))
             row[2].value = '命中' if matches else ('待正文' if n['status'] != '成功' else '未命中')
             row[3].value = '、'.join(matches)
             row[5].value = n['status']
@@ -701,7 +729,9 @@ def refresh_book(book, con: sqlite3.Connection, names: list[str], cfg: dict) -> 
                 row[7].value = '事件日期已填写（I列可复核）'
             else:
                 row[7].value = '事件日期未确认；跨月新闻请核对后在I列填写'
-            if choose == 'exclude':
+            if invalid_event:
+                row[7].value = 'I列事件日期无效：请填写真实日期 YYYY-MM-DD（已暂停收录）'
+            elif choose == 'exclude':
                 row[7].value = '人工排除；' + row[7].value
             row[2].alignment = Alignment(horizontal='center')
             row[4].alignment = Alignment(horizontal='center')
