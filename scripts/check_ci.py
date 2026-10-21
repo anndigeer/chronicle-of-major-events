@@ -13,7 +13,7 @@ REQUIRED = (
     'test_jrjj_v2.py',
     'scripts/government_xml_smoke.py',
     '.github/workflows/news-collection.yml',
-    'scripts/test_government_xml.py',
+    'scripts/verify_month_output.py',
     '.github/workflows/python-ci.yml',
 )
 
