@@ -114,10 +114,22 @@ def load_config(path: Path) -> dict:
         LOG.info('已创建配置文件：%s', path)
     data = json.loads(path.read_text(encoding='utf-8'))
     cfg = {**config_defaults(), **data}
+    if (not isinstance(cfg['names'], list)
+            or not all(isinstance(name, str) for name in cfg['names'])):
+        raise ValueError('names 必须是字符串数组，例如 ["陈云", "黄强"]')
     cfg['names'] = sorted({norm_space(x) for x in cfg['names'] if norm_space(x) and len(norm_space(x)) >= 2})
     grace = cfg['late_publication_days']
     if type(grace) is not int or not 0 <= grace <= 31:
         raise ValueError('late_publication_days 必须为 0～31 的整数')
+    for key in ('max_pages', 'timeout_seconds'):
+        value = cfg[key]
+        if type(value) is not int or not 1 <= value <= 1000:
+            raise ValueError(f'{key} 必须为 1～1000 的整数')
+    delay = cfg['delay_seconds']
+    if type(delay) not in (int, float) or not 0 <= delay <= 60:
+        raise ValueError('delay_seconds 必须为 0～60 的非负数字')
+    if not isinstance(cfg['include_body_matches'], bool):
+        raise ValueError('include_body_matches 必须为 true 或 false')
     return cfg
 
 
@@ -570,6 +582,7 @@ def crawl(session: requests.Session, con: sqlite3.Connection,
         target_month or f'{year}-01', cfg['late_publication_days'])
     complete = False
     error = ''
+    last_page_signature: tuple[str, ...] | None = None
     for page in range(cfg['max_pages']):
         news, ok = fetch_list(session, page, cfg, debug)
         if not ok:
@@ -578,6 +591,12 @@ def crawl(session: requests.Session, con: sqlite3.Connection,
         if not news:
             complete = True  # API reached the end of the listing
             break
+        page_signature = tuple(n.url for n in news)
+        if page_signature == last_page_signature:
+            error = (f'新闻网第{page + 1}页与上一页内容完全相同，'
+                     '分页接口可能未正确翻页，采集不完整')
+            break
+        last_page_signature = page_signature
         current = [n for n in news if window_start <= n.pub_date <= window_end]
         count = 0
         for n in current:
@@ -1066,9 +1085,11 @@ def main(argv=None, *, base_dir: Path | None = None) -> int:
             if word:
                 LOG.info('Word已生成：%s（%d篇，正文去重）', word, len(chosen))
             else:
-                LOG.warning('该月份没有成功提取并满足筛选条件的正文，未生成Word')
+                LOG.error('该月份没有成功提取并满足筛选条件的正文，未生成Word；请检查日期、名单和采集日志')
             if failed:
-                LOG.warning('有%d篇已选新闻正文抓取失败，将在下次运行时重试', len(failed))
+                LOG.error('有%d篇已选新闻正文未抓取成功，Word可能缺少文章；下次将重试', len(failed))
+            if not word or failed:
+                return 1  # Do not report a complete monthly export.
     LOG.info('完成。输出文件位于：%s', results)
     return 0
 

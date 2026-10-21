@@ -42,7 +42,7 @@ class TestJjxw(unittest.TestCase):
                  patch.object(j, 'crawl', return_value={'jjxw': []}) as crawl, \
                  patch.object(j, 'fetch_article_details'):
                 status = j.main([], base_dir=p)
-            self.assertEqual(status, 0)
+            self.assertEqual(status, 1)  # no matching body -> no Word, not success
             self.assertTrue((p / 'results' / 'jiujiang_news.xlsx').exists())
             self.assertTrue((p / 'results' / 'jiujiang_cache.sqlite3').exists())
             self.assertEqual(crawl.call_args.args[-1], '2026-09')
@@ -392,6 +392,68 @@ class TestJjxw(unittest.TestCase):
                 chosen = j.refresh_book(book, con, ['陈云'], cfg)
                 self.assertEqual(len(chosen), 1)
                 self.assertEqual(chosen[0]['date'], '2026-09-17')
+
+    def test_repeated_api_page_fails_early_and_preserves_data(self):
+        """An API that ignores pageNumber must not keep looping and claim success."""
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            cfg = dict(j.config_defaults(), max_pages=50, delay_seconds=0)
+            entry = j.News('jjxw', '陈云召开会议',
+                'https://www.jjxw.cn/article/2026/09/18/918001.html',
+                '2026-09-18')
+            status = {}
+            with j.connect_db(p / 'db.sqlite3') as con:
+                with patch.object(j, 'fetch_list',
+                                  return_value=([entry], True)) as pages:
+                    new = j.crawl(None, con, {'jjxw': set()}, cfg, 2026, p,
+                                  '2026-09', status=status)
+                stored = con.execute(
+                    "SELECT count(*) FROM news WHERE source='jjxw'").fetchone()[0]
+            self.assertEqual(pages.call_count, 2)
+            self.assertFalse(status['complete'])
+            self.assertIn('完全相同', status['error'])
+            self.assertEqual(len(new['jjxw']), 1)
+            self.assertEqual(stored, 1)
+
+    def test_config_validation_catches_bad_values_before_network(self):
+        good = j.config_defaults()
+        samples = [
+            ('max_pages', 0), ('max_pages', 'ten'),
+            ('timeout_seconds', 0), ('delay_seconds', -1),
+            ('delay_seconds', 'slow'), ('include_body_matches', 'true'),
+            ('names', '陈云'), ('names', [42]),
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'config.json'
+            for key, invalid in samples:
+                cfg = dict(good, **{key: invalid})
+                path.write_text(json.dumps(cfg, ensure_ascii=False), 'utf-8')
+                with self.subTest(key=key, invalid=invalid):
+                    with self.assertRaises(ValueError):
+                        j.load_config(path)
+            path.write_text(json.dumps(good, ensure_ascii=False), 'utf-8')
+            self.assertEqual(j.load_config(path)['max_pages'], good['max_pages'])
+
+    def test_empty_export_does_not_report_success(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            self.assertEqual(j.main(['2026-09', '--export'], base_dir=p), 1)
+            self.assertFalse(list((p / 'results').glob('*.docx')))
+
+    def test_failed_selected_body_marks_partial_export(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            article = dict(source='jjxw', date='2026-09-20',
+                           title='陈云在九江调研', url='https://www.jjxw.cn/a',
+                           body=['陈云调研并部署相关工作。' * 8], status='成功')
+            bad = dict(source='jjxw', date='2026-09-21',
+                       title='陈云主持会议', url='https://www.jjxw.cn/b',
+                       body=[], status='失败')
+            with patch.object(j, 'fetch_article_details'), \
+                 patch.object(j, 'refresh_book', return_value=[article, bad]):
+                code = j.main(['2026-09', '--export'], base_dir=p)
+            self.assertEqual(code, 1)
+            self.assertTrue((p / 'results' / '市委大事记（2026年9月）.docx').exists())
 
     def test_news_json_api(self):
         obj = {'data': {'list': [
