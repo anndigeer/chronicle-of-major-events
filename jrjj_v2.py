@@ -252,18 +252,40 @@ def fetch_gov_xml_with_curl(url: str, timeout: int) -> bytes:
         '--compressed', '--retry', '0', '--connect-timeout', '6',
         '--max-time', str(max(10, min(int(timeout) + 6, 25))),
         '--header', 'Accept: */*',
-        '--header', 'Referer: https://www.jiujiang.gov.cn/zwzx/jrjj/?year=2026&page=1',
+        '--header', 'Accept-Language: zh-CN,zh-TW;q=0.9,zh;q=0.8',
+        '--header', f'Referer: https://www.jiujiang.gov.cn/zwzx/jrjj/?year={url.rsplit("data_", 1)[-1].split(".", 1)[0]}&page=2',
         '--output', '-', url,
     ]
+    # Pass optional, user-authorized credentials through curl stdin rather
+    # than command-line arguments, which could appear in a process listing.
+    private_headers = []
+    for env_name, header_name in (
+        ('JIUJIANG_API_KEY', 'x-api-key'), ('JIUJIANG_COOKIE', 'Cookie')):
+        value = os.environ.get(env_name, '')
+        if value:
+            if any(c in value for c in '\\r\\n\\x00'):
+                raise ValueError(f'{env_name} 含不合法换行或控制字符')
+            quoted = value.replace('\\\\', '\\\\\\\\').replace('"', '\\\\"')
+            private_headers.append('header = "' + header_name + ': ' + quoted + '"')
+    if private_headers:
+        command.extend(['--config', '-'])
     try:
+        run_kwargs = {}
+        if private_headers:
+            run_kwargs['input'] = ('\\n'.join(private_headers) + '\\n').encode('utf-8')
         done = subprocess.run(command, check=True, capture_output=True,
-                              timeout=max(12, min(int(timeout) + 9, 30)))
+                              timeout=max(12, min(int(timeout) + 9, 30)),
+                              **run_kwargs)
     except FileNotFoundError as exc:
         raise RuntimeError('curl 未安装，无法执行政府 XML 备用请求') from exc
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError('curl 获取政府 XML 超时') from exc
     except subprocess.CalledProcessError as exc:
-        stderr = exc.stderr.decode('utf-8', errors='replace').strip()[:500]
+        stderr = (exc.stderr or b'').decode('utf-8', errors='replace').strip()[:500]
+        for name in ('JIUJIANG_API_KEY', 'JIUJIANG_COOKIE'):
+            secret = os.environ.get(name, '')
+            if secret:
+                stderr = stderr.replace(secret, '[REDACTED]')
         raise RuntimeError(f'curl 下载政府 XML 失败（退出码 {exc.returncode}）：{stderr}') from exc
     if not done.stdout.strip():
         raise ValueError('curl 返回空 XML')
@@ -393,7 +415,15 @@ def fetch_list(session: requests.Session, source: str, page: int, cfg: dict,
             session.headers['Accept'] = 'application/json, text/plain, */*'
             session.headers['Referer'] = 'https://www.jjxw.cn/'
         if source == 'gov':
-            response_data = fetch_government_xml(session, url, cfg['timeout_seconds'])
+            xml_file = cfg.get('gov_xml_file')
+            if xml_file:
+                file_path = Path(xml_file)
+                response_data = file_path.read_bytes()
+                if not response_data.strip():
+                    raise ValueError(f'本地政府 XML 文件为空：{file_path}')
+                LOG.info('使用本地政府年度 XML：%s，%d 字节', file_path, len(response_data))
+            else:
+                response_data = fetch_government_xml(session, url, cfg['timeout_seconds'])
         else:
             response_data = fetch_html(session, url, cfg['timeout_seconds'])
         rows = parse_gov_xml(response_data) if source == 'gov' else parse_jjxw_json(response_data)
@@ -939,6 +969,7 @@ def args_parser():
     parser.add_argument('--content-scope', choices=['all', 'month'], default='all', help='抓取新文章正文的范围：all或仅指定月份（旧Excel历史文章按需抓取）')
     parser.add_argument('--browser', action='store_true', help='启用Playwright浏览器作为HTML/正文失败时的可选回退')
     parser.add_argument('--config', default='jrjj_config.json', help='配置文件路径')
+    parser.add_argument('--gov-xml-file', help='本地政府年度 XML 路径，跳过政府列表网络下载（正文仍需联网）')
     parser.add_argument('--excel', default='jiujiang_news.xlsx', help='新闻列表Excel文件')
     parser.add_argument('--database', default='jiujiang_cache.sqlite3', help='新闻正文缓存数据库')
     parser.add_argument('--output-dir', default='.', help='Word输出目录')
@@ -957,6 +988,8 @@ def main(argv=None) -> int:
         raise SystemExit('月份格式错误，请使用 --month 2026-09')
     year = args.year or int(month[:4])
     cfg = load_config(Path(args.config))
+    if args.gov_xml_file:
+        cfg['gov_xml_file'] = args.gov_xml_file
     if args.max_pages:
         cfg['max_pages'] = args.max_pages
     if args.full_scan:

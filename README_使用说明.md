@@ -96,6 +96,18 @@ py -3 jrjj_v2.py --browser
 
 如果某篇新闻的正文失败，F 列会显示“失败”，H 列显示原因；系统**不会把空白正文写进 Word**。下次运行会尝试补抓。
 
+### 政府 XML 下载失败时使用 curl 或本地文件
+
+程序先使用 `requests.get()`，连接失败后自动改用系统 `curl`；两者都依赖当前网络环境，因此无法保证 GitHub 托管 Runner 能连通政府网站。
+
+在你已经确认 cURL 可以成功请求的电脑上，用之前成功的 cURL 命令加上 `-o data_2026.xml` 保存文件，然后运行：
+
+```powershell
+py -3 jrjj_v2.py --month 2026-09 --year 2026 --only-month --content-scope month --gov-xml-file data_2026.xml
+```
+
+程序会用文件中的 `PUBURL` 解析政府新闻列表，避免重新请求政府 XML。**文章正文仍需要联网**，政府正文网站不可访问时不能生成完整 Word。若合法授权要求 API 密钥或 Cookie，程序可从环境变量 `JIUJIANG_API_KEY`、`JIUJIANG_COOKIE` 读取；绝不要把凭据写进代码、日志或公开仓库。
+
 ## 七、目录中的文件
 
 - `jrjj_v2.py`：主程序。

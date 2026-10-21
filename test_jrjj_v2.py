@@ -101,6 +101,44 @@ class TestJrjj(unittest.TestCase):
                 j.fetch_government_xml(j.build_session('test-agent'), response.url, 8)
         self.assertEqual(request_get.call_count, 1)
 
+    def test_curl_uses_authorized_headers_without_process_arg_leaks(self):
+        response = CompletedProcess(['curl'], 0, stdout=GOV_XML.encode('utf-8'), stderr=b'')
+        secrets = {'JIUJIANG_API_KEY': 'example-test-key',
+                   'JIUJIANG_COOKIE': 'example-test-cookie'}
+        with patch.dict(os.environ, secrets), patch.object(j.subprocess, 'run',
+                                                            return_value=response) as run:
+            payload = j.fetch_gov_xml_with_curl(
+                'https://www.jiujiang.gov.cn/zwzx/jrjj/data_2026.xml', 8)
+        self.assertEqual(len(j.parse_gov_xml(payload)), 2)
+        args = run.call_args.args[0]
+        self.assertNotIn('example-test-key', ' '.join(args))
+        self.assertNotIn('example-test-cookie', ' '.join(args))
+        self.assertIn('--config', args)
+        self.assertIn(b'x-api-key: example-test-key', run.call_args.kwargs['input'])
+        self.assertIn(b'Cookie: example-test-cookie', run.call_args.kwargs['input'])
+
+    def test_local_gov_xml_import_skips_network(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'data_2026.xml'
+            path.write_bytes(GOV_XML.encode('utf-8'))
+            config = {**j.config_defaults(), 'gov_xml_file': str(path)}
+            with patch.object(j, 'fetch_government_xml',
+                              side_effect=AssertionError('should not fetch')):
+                rows, ok, _ = j.fetch_list(j.build_session('test-agent'),
+                                           'gov', 0, config, False, Path(folder), year=2026)
+            self.assertTrue(ok)
+            self.assertEqual(len(rows), 2)
+
+    def test_invalid_local_gov_xml_is_rejected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'data_2026.xml'
+            path.write_text('<html>Forbidden</html>', encoding='utf-8')
+            config = {**j.config_defaults(), 'gov_xml_file': str(path)}
+            rows, ok, _ = j.fetch_list(j.build_session('test-agent'),
+                                       'gov', 0, config, False, Path(folder), year=2026)
+            self.assertFalse(ok)
+            self.assertEqual(rows, [])
+
     def test_government_annual_xml_feed(self):
         records=j.parse_gov_xml(GOV_XML)
         self.assertEqual(len(records),2)
