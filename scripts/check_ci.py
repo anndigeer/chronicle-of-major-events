@@ -12,6 +12,7 @@ REQUIRED = (
     'requirements_v2.txt',
     'test_jrjj_v2.py',
     'scripts/live_smoke.py',
+    'scripts/test_government_xml.py',
     '.github/workflows/python-ci.yml',
 )
 

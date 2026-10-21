@@ -55,7 +55,7 @@ jobs:
       - name: Check script syntax
         run: python -m compileall -q jrjj_v2.py test_jrjj_v2.py scripts/
 
-      - name: Run eight offline regression tests
+      - name: Run offline regression tests
         run: python -m unittest -v test_jrjj_v2
 
       - name: Check command-line interface with legacy Windows codepage
@@ -81,3 +81,28 @@ jobs:
         run: python -m pip install -r requirements_v2.txt
       - name: Verify public news sources and article extraction
         run: python scripts/live_smoke.py
+
+  government-xml-test:
+    name: One-time government XML and leader-article smoke test
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[gov-xml-test]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements_v2.txt
+      - name: Fetch government XML and matching article bodies
+        env:
+          PYTHONUNBUFFERED: '1'
+          PYTHONIOENCODING: utf-8
+        run: python scripts/test_government_xml.py
+      - name: Upload diagnostics regardless of result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: government-xml-diagnostics
+          path: diagnostics/
+          if-no-files-found: warn
+          retention-days: 14
