@@ -1,59 +1,23 @@
-name: Python CI
-
+name: Python CI (offline)
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
-
 permissions:
   contents: read
-
-# Windows runners otherwise may default to cp1252 when Python writes Chinese CLI help.
-env:
-  PYTHONUTF8: '1'
-  PYTHONIOENCODING: 'utf-8'
-
 jobs:
-  unit-tests:
-    name: Offline tests / ${{ matrix.os }} / Python ${{ matrix.python-version }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            python-version: '3.10'
-          - os: ubuntu-latest
-            python-version: '3.12'
-          - os: windows-latest
-            python-version: '3.12'
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
     steps:
-      - name: Checkout complete repository
-        uses: actions/checkout@v4
-
-      - name: Configure Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: '3.12'
           cache: pip
-          cache-dependency-path: requirements_v2.txt
-
-      - name: Install dependencies
-        run: python -m pip install -r requirements_v2.txt
-
-      - name: Check repository completeness and environment
-        run: python scripts/check_ci.py
-
-      - name: Check script syntax
-        run: python -m compileall -q jrjj_v2.py test_jrjj_v2.py scripts/
-
-      - name: Run offline regression tests
-        run: python -m unittest -v test_jrjj_v2
-
-      - name: Check command-line interface with legacy Windows codepage
-        run: python jrjj_v2.py --help
-        env:
-          PYTHONIOENCODING: cp1252
-
+          cache-dependency-path: requirements.txt
+      - run: python -m pip install -r requirements.txt
+      - run: python -m compileall -q main.py source_feeds.py test_main.py scripts/
+      - run: python -m unittest -v test_main
+      - run: python main.py --help

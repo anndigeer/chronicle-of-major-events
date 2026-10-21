@@ -1,38 +1,78 @@
-# 九江市委大事记自动整理工具
+# 九江新闻网 · 市委大事记自动整理
 
-从九江市政府“今日九江”和九江新闻网“九江时政”增量采集公开新闻，缓存正文，根据可编辑人名表自动筛选，导出双工作表 Excel 和按月排序的 Word 大事记。人工在 Excel 的 E 列选择“收录/排除”或者沿用黄色标记覆盖自动筛选。
+**唯一数据源：九江新闻网「九江时政」栏目**。通过公开 JSON 接口增量采集新闻；
+不连接九江市政府，不获取政府 XML，也不会自动抓取外部政要名单。
 
-**完整用法**见 [README_使用说明.md](README_使用说明.md)。
+功能：SQLite 缓存正文、config.json 的姓名自动筛选、Excel 人工收录/排除、
+正文去重、按月份导出 Word。Excel 仅有「九江新闻网」工作表。
 
-## 快速开始
+## 银河麒麟 MIPS64 Linux 安装
 
-建议 Python 3.10 以上。
+先检查服务器架构、Python 和包管理器：
 
-```bash
-python -m pip install -r requirements_v2.txt
-python jrjj_v2.py                         # 一键同步 + 导出上个月
-python jrjj_v2.py --mode sync             # 只采集和更新 Excel
-python jrjj_v2.py --mode export           # 人工复核后重新生成 Word
-python jrjj_v2.py --month 2026-09         # 指定月份
-```
+~~~bash
+uname -m
+python3 --version
+command -v apt || command -v dnf || command -v yum
+~~~
 
-把旧 `jiujiang_news.xlsx` 放到程序所在目录就能迁移历史记录。名单等参数可在 [jrjj_config.json](jrjj_config.json) 调整。
+建议 Python 3.10+。包依赖包括 python-docx，而 python-docx 依赖带 C 扩展的
+**lxml**。在 MIPS64 平台，PyPI 不一定有适配 wheel；优先从麒麟的软件仓库安装
+python3-lxml。若系统使用 APT，参考：
 
-## 测试 / GitHub Actions
+~~~bash
+sudo apt update
+sudo apt install -y python3-pip python3-venv python3-lxml
+~~~
 
-- 离线测试：`python -m unittest discover -v -p 'test_*.py'`，涵盖 XML/JSON、正文、姓名过滤、去重、旧版 Excel 兼容等。
-- [Python CI](.github/workflows/python-ci.yml)：正常提交只执行离线测试，不触发新闻抓取。
-- [News collection](.github/workflows/news-collection.yml)：**仅手动**选择 `government_smoke` 或 `month_export`；前者针对政府 XML、配置姓名和正文做有限量诊断，后者按月份生成 Excel 和 Word。
-- 政府 XML 的公网连接可能对 GitHub 托管 Runner 不可达；诊断失败报告会区分网络连接、HTTP 响应和解析问题。可将这个工作流配置到网络可达的自托管 Runner。
+如果使用 DNF / YUM，则从对应软件仓库查询并安装 python3-lxml。
+如需自行编译 lxml，还要安装 Python 开发头文件、C 编译器及
+libxml2/libxslt 开发包；不能假设所有麒麟 MIPS64 版本都能直接从 PyPI 安装。
 
-## 数据安全
+~~~bash
+git clone https://github.com/anndigeer/chronicle-of-major-events.git
+cd chronicle-of-major-events
+python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -c "import lxml, requests, bs4, openpyxl, docx; print('依赖可用')"
+python -m unittest -v test_main
+~~~
 
-仓库只提交程序、配置示例、说明和测试代码；`.gitignore` 排除个人 Excel、Word、数据库、备份及调试 HTML。不要将 GitHub PAT 放入代码、配置或 Actions YAML；CI 只使用 GitHub 提供的最小读取权限。
+虚拟环境使用 --system-site-packages 是为了复用系统提供的 MIPS64 lxml。
+若仍触发 lxml 编译或缺少依赖，需检查系统 Python 与软件包版本是否匹配。
 
-## 持续集成验证
+## 采集与导出
 
-在 GitHub Actions 的 **Python CI** 中检查 Ubuntu Python 3.10 / 3.12 和 Windows Python 3.12 的离线回归测试。网站连通性测试默认不运行，可在手动启动工作流时勾选 `live_smoke`。初次上传各文件时触发的早期失败记录不代表最新版本的状态，应查看最新提交对应的运行。
+~~~bash
+source .venv/bin/activate
+python main.py --month 2026-09 --only-month --content-scope month
+python main.py --mode sync --month 2026-09 --only-month
+python main.py --mode export --month 2026-09
+python main.py --help
+~~~
 
-## 政府 XML 一次性连通性检查
+默认月为上个月。生成：jiujiang_news.xlsx、jiujiang_cache.sqlite3、
+市委大事记（YYYY年M月）.docx。主程序不会自动在后台执行；
+如需定期运行请在服务器自行配置 cron。
 
-提交信息包含 `[gov-xml-test]` 时，现有 Python CI 将额外执行一次政府年度 XML 和 2026 年 9 月目标姓名新闻正文的联网诊断。诊断报告及日志作为 Artifact 保存，若 TCP 连接失败会如实失败。平时的提交不会执行此联网任务。月度文件导出统一使用 `.github/workflows/september-2026-export.yml` 手动触发；不再保留重复的九月采集工作流和配置。
+Excel 的 E 列可填「收录」或「排除」，旧黄色标记仍表示人工收录。
+配置文件 config.json 中的 names 是唯一自动匹配名单，include_body_matches
+决定是否搜索正文。更改名单后使用 export 模式重新筛选。
+
+Word 去重：正文一致但标题不同会合并；标题相同、日期相近时，还需正文高度相似。
+如果标题相同但内容不同，则保留多篇。Excel 保留原始新闻记录。
+
+## 旧数据与安全
+
+**运行前会自动备份已有 Excel 到「备份」目录**。旧双工作表 Excel 中的
+「九江新闻网」表格（包括手工选择和黄色标记）会保留；其他旧表不再进入新版 Excel，
+但在原始备份中保留。旧 SQLite 中的政府来源记录不会被读取、请求或写入 Word。
+首次迁移前仍建议自行另存原始 Excel/SQLite 文件。
+
+仅通过手动 GitHub Actions 运行联网采集；普通代码提交的 Python CI 只运行离线测试。
+CI 使用 x86_64 Linux，并不等于已在银河麒麟 MIPS64 原生设备验证。
+请在实际服务器执行上述测试与一次月度采集。
+
+项目源码：main.py、source_feeds.py；配置：config.json、requirements.txt；
+测试：test_main.py；可选月度验证：scripts/verify_month_output.py。
