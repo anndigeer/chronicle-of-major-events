@@ -8,7 +8,6 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill
 from docx import Document
 import main as j
-from source_feeds import parse_jjxw_json
 
 
 def article(title, body):
@@ -29,11 +28,22 @@ class TestJjxw(unittest.TestCase):
             {'fileID': 190002, 'publishTime': '2026-09-17 10:00:00',
              'title': '普通报道'}
         ]}}
-        rows = parse_jjxw_json(obj)
+        rows = j.parse_jjxw_json(obj)
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0][2], '2026-09-18')
         self.assertEqual(rows[0][1],
                          'https://www.jjxw.cn/article/2026/09/18/190001.html')
+
+    def test_verify_missing_artifacts_does_not_create_database(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            with patch.object(j, 'fetch_html', side_effect=AssertionError('offline')):
+                result = j.main(['--mode', 'verify', '--month', '2026-09',
+                                 '--excel', str(p / 'missing.xlsx'),
+                                 '--output-dir', str(p)])
+            self.assertEqual(result, 1)
+            self.assertTrue((p / '抓取检查报告.json').exists())
+            self.assertFalse((p / 'jiujiang_cache.sqlite3').exists())
 
     def test_organization_terms_not_personal_names(self):
         names = j.get_names(j.config_defaults())
@@ -170,6 +180,16 @@ class TestJjxw(unittest.TestCase):
                       if paragraph._p.xpath('./w:pPr/w:outlineLvl')]
             self.assertEqual(len(titles), 1)
             self.assertIn('陈云', titles[0])
+            verified = j.main([
+                '--mode', 'verify', '--month', '2026-09',
+                '--excel', str(p / 'news.xlsx'), '--output-dir', str(p)
+            ])
+            self.assertEqual(verified, 0)
+            report = json.loads((p / '抓取检查报告.json').read_text('utf-8'))
+            self.assertEqual(report['news'], 3)
+            self.assertEqual(report['matched'], 2)
+            self.assertEqual(report['word_articles'], 1)
+            self.assertFalse(report['errors'])
 
 
 if __name__ == '__main__':

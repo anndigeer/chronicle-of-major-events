@@ -42,7 +42,7 @@ jobs:
         id: verify
         if: always()
         continue-on-error: true
-        run: python scripts/verify_month_output.py --month "${{ inputs.month }}" --folder results
+        run: python main.py --mode verify --month "${{ inputs.month }}" --excel results/jiujiang_news.xlsx --output-dir results
       - name: Upload results, logs and cache
         if: always()
         uses: actions/upload-artifact@v4

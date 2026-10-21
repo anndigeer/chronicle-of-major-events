@@ -13,7 +13,7 @@ import shutil
 import sqlite3
 import sys
 import time
-from source_feeds import parse_jjxw_json
+import html
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -134,6 +134,59 @@ def fetch_html(session: requests.Session, url: str, timeout: int) -> str:
     if not r.encoding or r.encoding.lower() in {'iso-8859-1', 'ascii'}:
         r.encoding = r.apparent_encoding or 'utf-8'
     return r.text
+
+
+FEED_DATE = re.compile(r'(20\d{2})[-年/.](1[0-2]|0?[1-9])[-月/.](3[01]|[12]\d|0?[1-9])')
+
+
+def day_from_text(text: object) -> str:
+    m = FEED_DATE.search(str(text or ''))
+    if not m:
+        return ''
+    try:
+        return date(*map(int, m.groups())).isoformat()
+    except ValueError:
+        return ''
+
+
+def parse_jjxw_json(payload: str | bytes | dict) -> list[tuple[str, str, str]]:
+    """Return (title, URL, day) from column 668's paginated API."""
+    data = json.loads(payload) if isinstance(payload, (str, bytes)) else payload
+    arrays = []
+
+    def walk(x, depth=0):
+        if depth > 8:
+            return
+        if isinstance(x, list):
+            if any(isinstance(v, dict) and ('fileID' in v or 'fileId' in v) for v in x):
+                arrays.append(x)
+            else:
+                for v in x[:5]:
+                    walk(v, depth + 1)
+        elif isinstance(x, dict):
+            for v in x.values():
+                if isinstance(v, (dict, list)):
+                    walk(v, depth + 1)
+
+    walk(data)
+    found = []
+    seen = set()
+    for arr in arrays:
+        for obj in arr:
+            if not isinstance(obj, dict):
+                continue
+            ident = str(obj.get('fileID') or obj.get('fileId') or '').strip()
+            day = day_from_text(obj.get('publishTime') or obj.get('publishedTime'))
+            title = html.unescape(str(obj.get('title') or obj.get('articleTitle') or
+                                      obj.get('fileTitle') or obj.get('name') or '')).strip()
+            if not re.fullmatch(r'\d{1,15}', ident) or not day or len(title) < 2:
+                continue
+            yy, mm, dd = day.split('-')
+            url = f'https://www.jjxw.cn/article/{yy}/{mm}/{dd}/{ident}.html'
+            if url not in seen:
+                found.append((title, url, day))
+                seen.add(url)
+    return found
 
 
 def fetch_list(session: requests.Session, page: int, cfg: dict,
@@ -709,11 +762,62 @@ def previous_month(today: date | None = None) -> str:
     return (today.replace(day=1) - timedelta(days=1)).strftime('%Y-%m')
 
 
+def verify_month_output(month: str, excel: Path, output_dir: Path) -> int:
+    """Verify monthly output without network or database writes."""
+    report = {
+        'month': month, 'source': '九江新闻网', 'news': 0,
+        'matched': 0, 'word_articles': 0, 'errors': [],
+    }
+    if not excel.exists():
+        report['errors'].append('缺少Excel文件')
+    else:
+        try:
+            book = load_workbook(excel, read_only=True)
+            try:
+                if book.sheetnames != ['九江新闻网']:
+                    report['errors'].append('Excel必须只有九江新闻网工作表')
+                else:
+                    for row in book.active.iter_rows(min_row=2, max_col=8,
+                                                     values_only=True):
+                        if not row[0]:
+                            continue
+                        report['news'] += 1
+                        if not str(row[1] or '').startswith(month):
+                            report['errors'].append('包含非目标月份的记录')
+                        if row[2] == '命中':
+                            report['matched'] += 1
+            finally:
+                book.close()
+        except Exception as exc:
+            report['errors'].append(f'Excel读取失败：{exc}')
+    if not report['news']:
+        report['errors'].append('没有新闻网新闻')
+    year, month_number = map(int, month.split('-'))
+    words = list(output_dir.glob(
+        f'市委大事记（{year}年{month_number}月）*.docx')) if output_dir.exists() else []
+    if not words:
+        report['errors'].append('没有生成指定月份Word')
+    for path in words:
+        try:
+            doc = Document(path)
+            report['word_articles'] += sum(
+                bool(p._p.xpath('./w:pPr/w:outlineLvl')) for p in doc.paragraphs)
+        except Exception as exc:
+            report['errors'].append(f'Word读取失败：{path.name} — {exc}')
+    if not report['word_articles']:
+        report['errors'].append('Word没有新闻正文')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / '抓取检查报告.json').write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+    LOG.info('导出验证：%s', json.dumps(report, ensure_ascii=False))
+    return 1 if report['errors'] else 0
+
+
 def args_parser():
     parser = argparse.ArgumentParser(description='九江新闻网：增量抓取、姓名筛选、按月生成大事记')
     parser.add_argument('--month', help='输出年月，格式 YYYY-MM；默认上个月')
     parser.add_argument('--year', type=int, help='抓取年份，默认输出月份所在年份')
-    parser.add_argument('--mode', choices=['all', 'sync', 'export'], default='all', help='all一键完整流程；sync只更新Excel和正文；export跳过列表抓取，只补正文并导出Word')
+    parser.add_argument('--mode', choices=['all', 'sync', 'export', 'verify'], default='all', help='all完整流程；sync更新Excel正文；export只导出；verify离线验证结果')
     parser.add_argument('--content-scope', choices=['all', 'month'], default='all', help='抓取新文章正文的范围：all或仅指定月份（旧Excel历史文章按需抓取）')
     parser.add_argument('--config', default='config.json', help='配置文件路径')
     parser.add_argument('--excel', default='jiujiang_news.xlsx', help='新闻列表Excel文件')
@@ -732,6 +836,8 @@ def main(argv=None) -> int:
     month = args.month or previous_month()
     if not re.fullmatch(r'20\d{2}-(0[1-9]|1[0-2])', month):
         raise SystemExit('月份格式错误，请使用 --month 2026-09')
+    if args.mode == 'verify':
+        return verify_month_output(month, Path(args.excel), Path(args.output_dir))
     year = args.year or int(month[:4])
     cfg = load_config(Path(args.config))
     if args.max_pages:

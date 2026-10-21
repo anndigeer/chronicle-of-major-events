@@ -74,5 +74,14 @@ Word 去重：正文一致但标题不同会合并；标题相同、日期相近
 CI 使用 x86_64 Linux，并不等于已在银河麒麟 MIPS64 原生设备验证。
 请在实际服务器执行上述测试与一次月度采集。
 
-项目源码：main.py、source_feeds.py；配置：config.json、requirements.txt；
-测试：test_main.py；可选月度验证：scripts/verify_month_output.py。
+项目现在只保留两个 Python 文件：`main.py`（采集、新闻网 JSON 解析、缓存、
+Excel/Word 导出和离线验证）以及 `test_main.py`（离线回归测试）。
+
+独立验证导出：
+
+~~~bash
+python main.py --mode verify --month 2026-09 --excel results/jiujiang_news.xlsx --output-dir results
+~~~
+
+`verify` 模式不联网，也不会生成数据库或备份 Excel。核验结果写入
+`results/抓取检查报告.json`。
