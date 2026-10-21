@@ -125,3 +125,7 @@ py -3 jrjj_v2.py --browser
 - `month_export`：按指定月份同时采集两站，生成 Excel、Word，并用 `scripts/verify_month_output.py` 统一核验。若政府网站不可达，仍上传已生成文件和诊断日志，但不会报告“完整成功”。
 
 正常的 `Python CI` 仅执行离线测试。政府接口若使用官方授权的 API Key，可配置仓库 Secret `JIUJIANG_API_KEY`；不要将密钥或 Cookie 写入源码或提交。
+
+### 政府 XML 的 curl 备用方案
+
+政府年度 XML 优先使用 Python `requests.get()`；若 IPv4 和默认网络栈均无法连接，会使用本机安装的 `curl` 发起一次限时 GET，并对响应做 XML 格式校验。`curl` 无法解决 GitHub 托管 Runner 到政府网站的 TCP 网络不可达；在本地可正常访问的网站网络环境运行即可复用此功能。不要将网站的真实授权密钥或 Cookie 提交到公开仓库。

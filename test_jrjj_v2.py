@@ -58,6 +58,38 @@ class TestJrjj(unittest.TestCase):
         self.assertEqual(request_get.call_count, 2)
         self.assertEqual(len(j.parse_gov_xml(xml)), 2)
 
+    def test_curl_fallback_valid_xml(self):
+        from subprocess import CompletedProcess
+        result = CompletedProcess(['curl'], 0, stdout=GOV_XML.encode('utf-8'), stderr=b'')
+        with patch.object(j.subprocess, 'run', return_value=result) as run:
+            rows = j.parse_gov_xml(j.fetch_gov_xml_with_curl(
+                'https://www.jiujiang.gov.cn/zwzx/jrjj/data_2026.xml', 8))
+        self.assertEqual(len(rows), 2)
+        self.assertIn('--compressed', run.call_args.args[0])
+        self.assertIn('--fail', run.call_args.args[0])
+
+    def test_curl_fallback_rejects_html_and_http_failure(self):
+        from subprocess import CompletedProcess, CalledProcessError
+        url = 'https://www.jiujiang.gov.cn/zwzx/jrjj/data_2026.xml'
+        with patch.object(j.subprocess, 'run', return_value=CompletedProcess(
+                ['curl'], 0, stdout=b'<html>Forbidden</html>', stderr=b'')):
+            with self.assertRaises(Exception):
+                j.fetch_gov_xml_with_curl(url, 8)
+        with patch.object(j.subprocess, 'run', side_effect=CalledProcessError(
+                22, ['curl'], stderr=b'HTTP 403')):
+            with self.assertRaisesRegex(RuntimeError, '403'):
+                j.fetch_gov_xml_with_curl(url, 8)
+
+    def test_curl_used_only_after_both_requests_connection_failures(self):
+        err = j.requests.exceptions.ConnectionError('network unreachable')
+        with patch.object(j.requests, 'get', side_effect=[err, err]) as get, \
+             patch.object(j, 'fetch_gov_xml_with_curl', return_value=GOV_XML.encode('utf-8')) as curl:
+            content = j.fetch_government_xml(j.build_session('test-agent'),
+                'https://www.jiujiang.gov.cn/zwzx/jrjj/data_2026.xml', 7)
+        self.assertEqual(get.call_count, 2)
+        curl.assert_called_once()
+        self.assertEqual(len(j.parse_gov_xml(content)), 2)
+
     def test_gov_xml_http_error_is_not_retried(self):
         response = j.requests.Response()
         response.status_code = 403

@@ -11,6 +11,7 @@ import os
 import re
 import socket
 import shutil
+import subprocess
 import sqlite3
 import sys
 import threading
@@ -240,6 +241,37 @@ def fetch_html(session: requests.Session, url: str, timeout: int) -> str:
 _GOV_IPV4_LOCK = threading.RLock()
 
 
+def fetch_gov_xml_with_curl(url: str, timeout: int) -> bytes:
+    """Bounded curl GET fallback for a network-reachable host.
+
+    curl is not a way around a blocked TCP route or access controls.
+    Do not copy browser cookies or credentials into public source code.
+    """
+    command = [
+        'curl', '--fail', '--silent', '--show-error', '--location',
+        '--compressed', '--retry', '0', '--connect-timeout', '6',
+        '--max-time', str(max(10, min(int(timeout) + 6, 25))),
+        '--header', 'Accept: */*',
+        '--header', 'Referer: https://www.jiujiang.gov.cn/zwzx/jrjj/?year=2026&page=1',
+        '--output', '-', url,
+    ]
+    try:
+        done = subprocess.run(command, check=True, capture_output=True,
+                              timeout=max(12, min(int(timeout) + 9, 30)))
+    except FileNotFoundError as exc:
+        raise RuntimeError('curl 未安装，无法执行政府 XML 备用请求') from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError('curl 获取政府 XML 超时') from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode('utf-8', errors='replace').strip()[:500]
+        raise RuntimeError(f'curl 下载政府 XML 失败（退出码 {exc.returncode}）：{stderr}') from exc
+    if not done.stdout.strip():
+        raise ValueError('curl 返回空 XML')
+    # Fail early for HTML error pages masquerading as HTTP 200.
+    parse_gov_xml(done.stdout)
+    return done.stdout
+
+
 def fetch_government_xml(session: requests.Session, url: str, timeout: int) -> bytes:
     """Fetch annual government XML with requests.get; prefer IPv4.
 
@@ -295,11 +327,14 @@ def fetch_government_xml(session: requests.Session, url: str, timeout: int) -> b
         try:
             return get_once()
         except requests.exceptions.ConnectionError as second_error:
-            raise requests.exceptions.ConnectionError(
-                f'政府 XML 两次 GET 均无法建立连接（IPv4 优先、默认协议栈回退）。'
-                f'网站或云服务器网络可能限制访问；首次：{first_error}；'
-                f'回退：{second_error}'
-            ) from second_error
+            LOG.warning('政府 XML requests 两次连接失败，最后尝试 curl：%s', second_error)
+            try:
+                return fetch_gov_xml_with_curl(url, timeout)
+            except Exception as curl_error:
+                raise requests.exceptions.ConnectionError(
+                    '政府 XML 下载失败：requests IPv4、默认网络栈和 curl 均未成功。'
+                    f' IPv4: {first_error}; default: {second_error}; curl: {curl_error}'
+                ) from curl_error
 
 
 def fetch_with_browser(url: str, timeout: int) -> str:
