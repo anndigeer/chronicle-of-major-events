@@ -12,6 +12,7 @@ import shutil
 import sqlite3
 import sys
 import time
+from source_feeds import parse_gov_xml, parse_jjxw_json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -262,35 +263,54 @@ def discover_next_url(html: str, current_url: str, source: str) -> str:
 
 
 def fetch_list(session: requests.Session, source: str, page: int, cfg: dict,
-               use_browser: bool, debug_dir: Path, preferred_url: str = '') -> tuple[list[News], bool, str]:
-    errors = []
-    urls = ([preferred_url] if preferred_url else []) + next_page_urls(source, page)
-    for url in dict.fromkeys(urls):
-        try:
-            html = fetch_html(session, url, cfg['timeout_seconds'])
-            items = parse_listing(html, source, url)
-            if not items and use_browser:
-                html = fetch_with_browser(url, cfg['timeout_seconds'])
-                items = parse_listing(html, source, url)
-            if items:
-                return items, True, discover_next_url(html, url, source)
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            (debug_dir / f'{source}_page_{page}.html').write_text(html, encoding='utf-8')
-            errors.append(f'已访问但无法识别列表：{url}')
-        except Exception as exc:
-            errors.append(f'{url}: {exc}')
-            if use_browser:
-                try:
-                    html = fetch_with_browser(url, cfg['timeout_seconds'])
-                    items = parse_listing(html, source, url)
-                    if items:
-                        return items, True, discover_next_url(html, url, source)
-                    debug_dir.mkdir(parents=True, exist_ok=True)
-                    (debug_dir / f'{source}_page_{page}.html').write_text(html, encoding='utf-8')
-                except Exception as browser_exc:
-                    errors.append(f'浏览器回退失败：{browser_exc}')
-    LOG.warning('%s 第%d页失败：%s', source, page + 1, ' | '.join(errors)[:440])
-    return [], False, ''
+               use_browser: bool, debug_dir: Path, preferred_url: str = '',
+               year: int | None = None) -> tuple[list[News], bool, str]:
+    """Read XML / JSON feeds instead of crawling changing HTML listing pages.
+
+    Government XML is one file per year; Jiujiang News uses pageNumber
+    starting from 1 and caps each response at 100 articles.
+    """
+    if source == 'gov':
+        if page:
+            return [], True, ''
+        url = f"https://www.jiujiang.gov.cn/zwzx/jrjj/data_{year or date.today().year}.xml"
+    elif source == 'jjxw':
+        url = (f'https://api.jjxw.cn/api/getArticles?cid=668&pageSize=100'
+               f'&pageNumber={page + 1}&containSubCols=1')
+    else:
+        raise ValueError(f'Unsupported news source: {source}')
+
+    original_accept = session.headers.get('Accept')
+    original_referer = session.headers.get('Referer')
+    try:
+        if source == 'jjxw':
+            session.headers['Accept'] = 'application/json, text/plain, */*'
+            session.headers['Referer'] = 'https://www.jjxw.cn/'
+        response_text = fetch_html(session, url, cfg['timeout_seconds'])
+        rows = parse_gov_xml(response_text) if source == 'gov' else parse_jjxw_json(response_text)
+        news = [News(source, title, link, published) for title, link, published in rows]
+        if not news:
+            if source == 'jjxw' and page > 0:
+                LOG.info('九江新闻网 API 第%d页没有更多新闻，分页结束', page + 1)
+                return [], True, ''
+            raise ValueError('接口可访问，但未识别到新闻记录，请核对 XML/JSON 结构')
+        LOG.info('%s 数据接口第%d页获取 %d 条新闻', source, page + 1, len(news))
+        return news, True, ''
+    except Exception as exc:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        (debug_dir / f'{source}_feed_page_{page + 1}.txt').write_text(
+            f'URL: {url}\nERROR: {type(exc).__name__}: {exc}\n', encoding='utf-8')
+        LOG.error('%s 数据接口请求或解析失败：%s — %s', source, url, exc)
+        return [], False, ''
+    finally:
+        if original_accept is None:
+            session.headers.pop('Accept', None)
+        else:
+            session.headers['Accept'] = original_accept
+        if original_referer is None:
+            session.headers.pop('Referer', None)
+        else:
+            session.headers['Referer'] = original_referer
 
 
 def extract_ifeng_names(html: str) -> list[str]:
@@ -575,9 +595,9 @@ def crawl(session: requests.Session, con: sqlite3.Connection, known: dict[str, s
         known_pages = 0
         next_url = ''
         for page in range(cfg['max_pages']):
-            news, ok, discovered_next = fetch_list(session, source, page, cfg, browser, debug, next_url)
+            news, ok, discovered_next = fetch_list(session, source, page, cfg, browser, debug, next_url, year)
             next_url = discovered_next
-            if not ok:
+            if not ok or not news:
                 break
             in_year = [x for x in news if x.pub_date.startswith(target_month if target_month else f'{year}-')]
             old = len(in_year) and all(x.url in known[source] for x in in_year)
@@ -591,7 +611,10 @@ def crawl(session: requests.Session, con: sqlite3.Connection, known: dict[str, s
                     count += 1
                 upsert_news(con, n)
             con.commit()
-            LOG.info('%s 第%d页：解析 %d 条，本年 %d 条，新记录 %d 条', source, page + 1, len(news), len(in_year), count)
+            LOG.info('%s 第%d页：解析 %d 条，目标范围 %d 条，新记录 %d 条', source, page + 1, len(news), len(in_year), count)
+            if source == 'gov':
+                LOG.info('政府年度 XML 已一次获取完毕，无需分页')
+                break
             if older:
                 LOG.info('%s 已到 %d 年之前，停止', source, year)
                 break

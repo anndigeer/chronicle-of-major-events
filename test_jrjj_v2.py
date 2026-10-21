@@ -19,7 +19,42 @@ ARTICLE_MATCH='''<html><h1>市委召开专项会议</h1><div class="TRS_Editor">
 ARTICLE_JJ='''<html><h1>陈云在九江调研</h1><div class="article-content"><p>10月19日上午，陈云率领相关部门负责同志进行实地调研，深入了解产业发展中的困难。</p><p>他要求进一步优化营商环境，加强保障服务，推进区域高质量发展取得扎实成效。</p></div></html>'''
 ARTICLE_OTHER='''<html><h1>另一条普通新闻</h1><div id="artibody"><p>今天上午，多部门组织开展环境卫生改善行动，推动辖区生产生活环境进一步改善。</p><p>有关部门研究部署了下一阶段工作重点，确定任务分工和落实计划，现场检查了重点区域。</p></div></html>'''
 
+GOV_XML='''<?xml version="1.0" encoding="UTF-8"?><ROOT>
+<ITEM><TITLE><![CDATA[市委召开专项会议]]></TITLE><PUBDATE>2026-10-19 11:30:00</PUBDATE><PUBURL>./202610/t20261019_1234567.html</PUBURL></ITEM>
+<ITEM><TITLE>另一条普通新闻</TITLE><PUBURL>./202610/t20261018_2222222.html</PUBURL></ITEM></ROOT>'''
+JJXW_JSON=json.dumps({"data":{"list":[{"fileID":803640,"publishTime":"2026-10-19 10:45:07","title":"陈云在九江调研"},
+                                      {"fileID":"803641","publishTime":"2026-10-18 09:00:00","title":"市委召开专项会议"}]}},ensure_ascii=False)
+
 class TestJrjj(unittest.TestCase):
+    def test_government_annual_xml_feed(self):
+        records=j.parse_gov_xml(GOV_XML)
+        self.assertEqual(len(records),2)
+        self.assertEqual(records[0][0], '市委召开专项会议')
+        self.assertEqual(records[0][1], 'https://www.jiujiang.gov.cn/zwzx/jrjj/202610/t20261019_1234567.html')
+        self.assertEqual(records[1][2], '2026-10-18')
+
+    def test_jjxw_api_100_per_page_and_links(self):
+        records=j.parse_jjxw_json(JJXW_JSON)
+        self.assertEqual(len(records),2)
+        self.assertEqual(records[0][1], 'https://www.jjxw.cn/article/2026/10/19/803640.html')
+        self.assertEqual(records[0][2], '2026-10-19')
+        self.assertEqual(records[1][0], '市委召开专项会议')
+
+    def test_structured_fetch_routing_no_html_listing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            session=j.build_session('test-agent')
+            with patch.object(j,'fetch_html',side_effect=[GOV_XML, JJXW_JSON, '{"data":{"list":[]}}']) as fetch:
+                gov, ok, _=j.fetch_list(session,'gov',0,j.config_defaults(),False,Path(folder),year=2026)
+                self.assertTrue(ok)
+                self.assertEqual(len(gov),2)
+                self.assertIn('data_2026.xml',fetch.call_args_list[0].args[1])
+                jx, ok, _=j.fetch_list(session,'jjxw',0,j.config_defaults(),False,Path(folder),year=2026)
+                self.assertTrue(ok)
+                self.assertEqual(len(jx),2)
+                self.assertIn('pageSize=100&pageNumber=1',fetch.call_args_list[1].args[1])
+                empty, ok, _=j.fetch_list(session,'jjxw',1,j.config_defaults(),False,Path(folder),year=2026)
+                self.assertTrue(ok)
+                self.assertFalse(empty)
     def test_cli_help_with_cp1252_output(self):
         """Chinese argparse help must print even when inherited output is cp1252."""
         env = os.environ.copy()
@@ -102,8 +137,9 @@ class TestJrjj(unittest.TestCase):
             config={**j.config_defaults(),'fetch_ifeng_names':False,'delay_seconds':0,'max_pages':2,'stop_after_known_pages':2,'names':['陈云','黄强']}
             (p/'cfg.json').write_text(json.dumps(config,ensure_ascii=False),encoding='utf-8')
             def fake_fetch(session,url,timeout):
-                if url.endswith('/index.html') and '/jrjj/' in url:return GOV_HTML
-                if url.endswith('/index.html') and '/668/' in url:return JJXW_HTML
+                if 'data_2026.xml' in url:return GOV_XML
+                if 'getArticles' in url:
+                    return JJXW_JSON if 'pageNumber=1' in url else '{"data":{"list":[]}}'
                 if '1234567' in url or '803641' in url:return ARTICLE_MATCH
                 if '803640' in url:return ARTICLE_JJ
                 if '2222222' in url:return ARTICLE_OTHER
