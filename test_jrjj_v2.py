@@ -1,4 +1,5 @@
 """Offline regression tests for dual-source scraper."""
+import io
 import json
 import os
 import sqlite3
@@ -62,6 +63,7 @@ class TestJrjj(unittest.TestCase):
         response.status_code = 403
         response.url = 'https://www.jiujiang.gov.cn/zwzx/jrjj/data_2026.xml'
         response._content = b'Forbidden'
+        response.raw = io.BytesIO(b'Forbidden')
         with patch.object(j.requests, 'get', return_value=response) as request_get:
             with self.assertRaises(j.requests.exceptions.HTTPError):
                 j.fetch_government_xml(j.build_session('test-agent'), response.url, 8)
