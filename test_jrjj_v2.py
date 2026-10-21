@@ -99,16 +99,9 @@ class TestJrjj(unittest.TestCase):
                 self.assertTrue(ok)
                 self.assertFalse(empty)
     def test_unapproved_organization_terms_never_match(self):
-        """Regression: article about 廖奇志 was erroneously matched as 人大."""
-        page = ('<div class="part-c-l pull-left" data-name="jx_ld_zykl">'
-                '<h4>人大</h4><h4>省委</h4><h4>省政府</h4>'
-                '<h4>政协</h4><h4>法院</h4><h4>检察院</h4>'
-                '<h4>廖奇志</h4></div>')
-        self.assertEqual(j.extract_ifeng_names(page), ['廖奇志'])
-        cfg = {**j.config_defaults(), 'fetch_ifeng_names': True}
-        with patch.object(j, 'fetch_html', return_value=page):
-            names = j.get_names(j.build_session('test-agent'), cfg)
-        self.assertEqual(names, sorted(cfg['names']))
+        """No organization name or unrelated leader is approved implicitly."""
+        cfg = {**j.config_defaults(), 'names': ['陈云', '黄强']}
+        names = j.get_names(cfg)
         title = '市人大常委会党组理论学习中心组举行集体学习，廖奇志主持并讲话'
         body = ('9月2日，市人大常委会党组理论学习中心组举行集体学习。'
                 '市人大常委会党组书记、主任廖奇志主持并讲话。'
@@ -118,11 +111,9 @@ class TestJrjj(unittest.TestCase):
 
     def test_names_only_from_config_by_default(self):
         cfg = j.config_defaults()
-        self.assertFalse(cfg['fetch_ifeng_names'])
-        with patch.object(j, 'fetch_html', side_effect=AssertionError('should not fetch')) as fetch:
-            self.assertEqual(j.get_names(j.build_session('test-agent'), cfg),
-                             sorted(cfg['names']))
-            fetch.assert_not_called()
+        self.assertNotIn('fetch_ifeng_names', cfg)
+        self.assertEqual(j.get_names(cfg), sorted(cfg['names']))
+        self.assertFalse(hasattr(j, 'extract_ifeng_names'))
 
     def test_cli_help_with_cp1252_output(self):
         """Chinese argparse help must print even when inherited output is cp1252."""
