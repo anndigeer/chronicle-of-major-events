@@ -8,6 +8,7 @@ import json
 from contextlib import contextmanager
 import logging
 import re
+import socket
 import shutil
 import sqlite3
 import sys
@@ -233,6 +234,46 @@ def fetch_html(session: requests.Session, url: str, timeout: int) -> str:
     return r.text
 
 
+def fetch_gov_xml_ipv4(url: str, timeout: int, user_agent: str) -> str:
+    """Retry annual XML over IPv4 with requests.get after the normal request fails.
+
+    urllib3's address-family selector is process-wide; this bounded fallback
+    runs in the single-threaded crawler, and always restores the original.
+    A proxy may resolve the target remotely, so IPv4 selection is not a
+    workaround for server-side IP restrictions or proxy routing failures.
+    """
+    import urllib3.util.connection as urllib3_connection
+
+    try:
+        answers = socket.getaddrinfo('www.jiujiang.gov.cn', 443, type=socket.SOCK_STREAM)
+        ips4 = sorted({row[4][0] for row in answers if row[0] == socket.AF_INET})
+        ips6 = sorted({row[4][0] for row in answers if row[0] == socket.AF_INET6})
+        LOG.warning('政府网站 DNS: IPv4=%s; IPv6=%s', ips4, ips6)
+    except OSError as exc:
+        LOG.warning('政府网站 DNS 诊断失败：%s', exc)
+
+    original_family = urllib3_connection.allowed_gai_family
+    urllib3_connection.allowed_gai_family = lambda: socket.AF_INET
+    try:
+        LOG.warning('政府 XML 使用 requests.get() 强制 IPv4 再试一次')
+        response = requests.get(
+            url,
+            headers={
+                'User-Agent': user_agent,
+                'Accept': 'application/xml,text/xml,*/*;q=0.8',
+                'Referer': 'https://www.jiujiang.gov.cn/zwzx/jrjj/',
+            },
+            timeout=(6, min(timeout, 20)),
+        )
+        response.raise_for_status()
+        if not response.content.strip():
+            raise ValueError('政府 XML 返回空响应')
+        response.encoding = 'utf-8-sig'
+        return response.text
+    finally:
+        urllib3_connection.allowed_gai_family = original_family
+
+
 def fetch_with_browser(url: str, timeout: int) -> str:
     """Optional Chromium fallback. Runs only with --browser and installed playwright."""
     try:
@@ -286,7 +327,15 @@ def fetch_list(session: requests.Session, source: str, page: int, cfg: dict,
         if source == 'jjxw':
             session.headers['Accept'] = 'application/json, text/plain, */*'
             session.headers['Referer'] = 'https://www.jjxw.cn/'
-        response_text = fetch_html(session, url, cfg['timeout_seconds'])
+        if source == 'gov':
+            try:
+                response_text = fetch_html(session, url, cfg['timeout_seconds'])
+            except requests.RequestException as first_error:
+                LOG.warning('政府 XML 常规请求失败：%s', first_error)
+                response_text = fetch_gov_xml_ipv4(
+                    url, cfg['timeout_seconds'], cfg['user_agent'])
+        else:
+            response_text = fetch_html(session, url, cfg['timeout_seconds'])
         rows = parse_gov_xml(response_text) if source == 'gov' else parse_jjxw_json(response_text)
         news = [News(source, title, link, published) for title, link, published in rows]
         if not news:
