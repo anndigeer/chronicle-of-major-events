@@ -849,13 +849,15 @@ def _similar_article_body(a: str, b: str) -> bool:
         return True
     if min(len(a), len(b)) < 100:
         return False
-    a_pairs = {a[i:i + 2] for i in range(len(a) - 1)}
-    b_pairs = {b[i:i + 2] for i in range(len(b) - 1)}
+    from collections import Counter
+    a_pairs = Counter(a[i:i + 2] for i in range(len(a) - 1))
+    b_pairs = Counter(b[i:i + 2] for i in range(len(b) - 1))
     if not a_pairs or not b_pairs:
         return False
-    shared = len(a_pairs & b_pairs)
-    # Bigrams capture repeated sentences despite small editor/byline differences.
-    return shared / len(a_pairs | b_pairs) >= 0.90
+    # Multiset counts keep long repeated phrases weighted correctly.
+    shared = sum((a_pairs & b_pairs).values())
+    total = sum((a_pairs | b_pairs).values())
+    return shared / total >= 0.90
 
 
 def _same_news_story(a: dict, b: dict) -> bool:

@@ -2,6 +2,7 @@
 import io
 import json
 import os
+from subprocess import CompletedProcess
 import sqlite3
 import subprocess
 import sys
