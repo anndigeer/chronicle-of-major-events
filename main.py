@@ -706,7 +706,7 @@ def refresh_book(book, con: sqlite3.Connection, names: list[str], cfg: dict) -> 
                 # A newly typed valid event date completes the manual review.
                 event_cell.comment = None
                 needs_manual_review = False
-            invalid_event = bool(norm_space(raw_event)) and not event_day
+            invalid_event = bool(norm_space(event_cell.value)) and not event_day
             if not event_day and not needs_manual_review and not invalid_event and n['status'] == '成功':
                 inferred = infer_event_date(
                     n['article_title'] or n['title'], paras, n['pub_date'],
