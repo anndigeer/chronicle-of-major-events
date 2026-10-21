@@ -263,16 +263,16 @@ def fetch_gov_xml_with_curl(url: str, timeout: int) -> bytes:
         ('JIUJIANG_API_KEY', 'x-api-key'), ('JIUJIANG_COOKIE', 'Cookie')):
         value = os.environ.get(env_name, '')
         if value:
-            if any(c in value for c in '\\r\\n\\x00'):
+            if any(c in value for c in '\r\n\x00'):
                 raise ValueError(f'{env_name} 含不合法换行或控制字符')
-            quoted = value.replace('\\\\', '\\\\\\\\').replace('"', '\\\\"')
+            quoted = value.replace('\\', '\\\\').replace('"', '\\"')
             private_headers.append('header = "' + header_name + ': ' + quoted + '"')
     if private_headers:
         command.extend(['--config', '-'])
     try:
         run_kwargs = {}
         if private_headers:
-            run_kwargs['input'] = ('\\n'.join(private_headers) + '\\n').encode('utf-8')
+            run_kwargs['input'] = ('\n'.join(private_headers) + '\n').encode('utf-8')
         done = subprocess.run(command, check=True, capture_output=True,
                               timeout=max(12, min(int(timeout) + 9, 30)),
                               **run_kwargs)
