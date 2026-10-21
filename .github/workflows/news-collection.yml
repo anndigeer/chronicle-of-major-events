@@ -25,25 +25,20 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install -r requirements.txt
-      - name: Collect one month from Jiujiang News
+      - name: Collect target month
         id: collect
         shell: bash
         continue-on-error: true
         run: |
           mkdir -p results
           set -o pipefail
-          python -u main.py --month "${{ inputs.month }}" --only-month \
-            --content-scope month --max-pages 15 \
-            --excel results/jiujiang_news.xlsx \
-            --database results/jiujiang_cache.sqlite3 \
-            --output-dir results --debug-dir results/debug_html \
-            2>&1 | tee results/collection.log
-      - name: Verify month output
+          python -u main.py "${{ inputs.month }}" 2>&1 | tee results/collection.log
+      - name: Verify results
         id: verify
         if: always()
         continue-on-error: true
-        run: python main.py --mode verify --month "${{ inputs.month }}" --excel results/jiujiang_news.xlsx --output-dir results
-      - name: Upload results, logs and cache
+        run: python main.py "${{ inputs.month }}" --verify
+      - name: Upload exported files and logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -51,7 +46,7 @@ jobs:
           path: results/
           if-no-files-found: warn
           retention-days: 14
-      - name: Fail on collection or validation errors
+      - name: Fail on collect or verification errors
         if: always()
         env:
           COLLECT: ${{ steps.collect.outcome }}

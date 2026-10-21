@@ -21,6 +21,32 @@ class TestJjxw(unittest.TestCase):
         self.assertNotIn('--gov-xml-file', j.args_parser().format_help())
         self.assertNotIn('--browser', j.args_parser().format_help())
 
+    def test_simplified_cli_and_month_validation(self):
+        parser = j.args_parser()
+        self.assertIsNone(parser.parse_args([]).month)
+        self.assertEqual(parser.parse_args(['2026-09']).month, '2026-09')
+        self.assertTrue(parser.parse_args(['--test']).test)
+        self.assertTrue(parser.parse_args(['2026-09', '--export']).export)
+        self.assertTrue(parser.parse_args(['2026-09', '--verify']).verify)
+        with self.assertRaises(SystemExit):
+            parser.parse_args(['--export', '--sync'])
+        with tempfile.TemporaryDirectory() as folder:
+            with self.assertRaises(SystemExit):
+                j.main(['2026-13'], base_dir=Path(folder))
+            self.assertFalse((Path(folder) / 'results').exists())
+
+    def test_no_args_defaults_to_previous_month_and_results_dir(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            with patch.object(j, 'previous_month', return_value='2026-09'), \
+                 patch.object(j, 'crawl', return_value={'jjxw': []}) as crawl, \
+                 patch.object(j, 'fetch_article_details'):
+                status = j.main([], base_dir=p)
+            self.assertEqual(status, 0)
+            self.assertTrue((p / 'results' / 'jiujiang_news.xlsx').exists())
+            self.assertTrue((p / 'results' / 'jiujiang_cache.sqlite3').exists())
+            self.assertEqual(crawl.call_args.args[-1], '2026-09')
+
     def test_news_json_api(self):
         obj = {'data': {'list': [
             {'fileID': 190001, 'publishTime': '2026-09-18 10:00:00',
@@ -38,12 +64,10 @@ class TestJjxw(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             p = Path(folder)
             with patch.object(j, 'fetch_html', side_effect=AssertionError('offline')):
-                result = j.main(['--mode', 'verify', '--month', '2026-09',
-                                 '--excel', str(p / 'missing.xlsx'),
-                                 '--output-dir', str(p)])
+                result = j.main(['2026-09', '--verify'], base_dir=p)
             self.assertEqual(result, 1)
-            self.assertTrue((p / '抓取检查报告.json').exists())
-            self.assertFalse((p / 'jiujiang_cache.sqlite3').exists())
+            self.assertTrue((p / 'results' / '抓取检查报告.json').exists())
+            self.assertFalse((p / 'results' / 'jiujiang_cache.sqlite3').exists())
 
     def test_organization_terms_not_personal_names(self):
         names = j.get_names(j.config_defaults())
@@ -162,30 +186,21 @@ class TestJjxw(unittest.TestCase):
 
             with patch.object(j.requests.Session, 'get', fake_get), \
                  patch.object(j, 'fetch_html', fake_html):
-                code = j.main([
-                    '--config', str(p / 'config.json'),
-                    '--month', '2026-09', '--year', '2026', '--only-month',
-                    '--excel', str(p / 'news.xlsx'),
-                    '--database', str(p / 'cache.sqlite3'),
-                    '--output-dir', str(p),
-                    '--debug-dir', str(p / 'debug')])
+                code = j.main(['2026-09'], base_dir=p)
             self.assertEqual(code, 0)
-            wb = load_workbook(p / 'news.xlsx')
+            wb = load_workbook(p / 'results' / 'jiujiang_news.xlsx')
             self.assertEqual(wb.sheetnames, ['九江新闻网'])
             self.assertEqual(wb.active.max_row, 4)
             self.assertEqual(sum(wb.active.cell(i, 3).value == '命中'
                                  for i in range(2, 5)), 2)
-            doc = Document(p / '市委大事记（2026年9月）.docx')
+            doc = Document(p / 'results' / '市委大事记（2026年9月）.docx')
             titles = [paragraph.text for paragraph in doc.paragraphs
                       if paragraph._p.xpath('./w:pPr/w:outlineLvl')]
             self.assertEqual(len(titles), 1)
             self.assertIn('陈云', titles[0])
-            verified = j.main([
-                '--mode', 'verify', '--month', '2026-09',
-                '--excel', str(p / 'news.xlsx'), '--output-dir', str(p)
-            ])
+            verified = j.main(['2026-09', '--verify'], base_dir=p)
             self.assertEqual(verified, 0)
-            report = json.loads((p / '抓取检查报告.json').read_text('utf-8'))
+            report = json.loads((p / 'results' / '抓取检查报告.json').read_text('utf-8'))
             self.assertEqual(report['news'], 3)
             self.assertEqual(report['matched'], 2)
             self.assertEqual(report['word_articles'], 1)

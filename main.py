@@ -814,68 +814,86 @@ def verify_month_output(month: str, excel: Path, output_dir: Path) -> int:
 
 
 def args_parser():
-    parser = argparse.ArgumentParser(description='九江新闻网：增量抓取、姓名筛选、按月生成大事记')
-    parser.add_argument('--month', help='输出年月，格式 YYYY-MM；默认上个月')
-    parser.add_argument('--year', type=int, help='抓取年份，默认输出月份所在年份')
-    parser.add_argument('--mode', choices=['all', 'sync', 'export', 'verify'], default='all', help='all完整流程；sync更新Excel正文；export只导出；verify离线验证结果')
-    parser.add_argument('--content-scope', choices=['all', 'month'], default='all', help='抓取新文章正文的范围：all或仅指定月份（旧Excel历史文章按需抓取）')
-    parser.add_argument('--config', default='config.json', help='配置文件路径')
-    parser.add_argument('--excel', default='jiujiang_news.xlsx', help='新闻列表Excel文件')
-    parser.add_argument('--database', default='jiujiang_cache.sqlite3', help='新闻正文缓存数据库')
-    parser.add_argument('--output-dir', default='.', help='Word输出目录')
-    parser.add_argument('--debug-dir', default='debug_html', help='页面识别失败时保存HTML的目录')
-    parser.add_argument('--max-pages', type=int, help='覆盖配置中的最多分页数')
-    parser.add_argument('--full-scan', action='store_true', help='即使连续遇到旧记录，也扫完当年全部分页')
-    parser.add_argument('--only-month', action='store_true', help='仅采集所选月份的新闻列表，遇到更早日期即停止；不会把其他月份写入Excel')
+    """Keep the user-facing CLI small; tuning lives in config.json."""
+    parser = argparse.ArgumentParser(
+        description='九江新闻网市委大事记：默认采集上个月，Excel/Word保存到results目录',
+        epilog=('示例：python main.py | python main.py 2026-09 | '
+                'python main.py --test | python main.py 2026-09 --export'))
+    parser.add_argument(
+        'month', nargs='?', metavar='YYYY-MM',
+        help='目标月份，默认上一个自然月，如 2026-09')
+    operation = parser.add_mutually_exclusive_group()
+    operation.add_argument('--test', action='store_true',
+                           help='运行离线测试，不联网也不创建采集文件')
+    operation.add_argument('--sync', action='store_true',
+                           help='只同步新闻到Excel和正文缓存，不生成Word')
+    operation.add_argument('--export', action='store_true',
+                           help='根据现有Excel与缓存重新生成Word，可补抓缺失正文')
+    operation.add_argument('--verify', action='store_true',
+                           help='离线检查指定月份的Excel和Word是否完整')
     return parser
 
 
-def main(argv=None) -> int:
+def main(argv=None, *, base_dir: Path | None = None) -> int:
     args = args_parser().parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s', datefmt='%H:%M:%S')
+    # Resolve paths relative to this script, not the terminal's current directory.
+    # base_dir is an internal test seam, not an extra command-line option.
+    root = Path(base_dir) if base_dir is not None else Path(__file__).resolve().parent
+    if args.test:
+        import subprocess
+        return subprocess.call(
+            [sys.executable, '-m', 'unittest', '-v', 'test_main'], cwd=root)
+
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s',
+                        datefmt='%H:%M:%S')
     month = args.month or previous_month()
     if not re.fullmatch(r'20\d{2}-(0[1-9]|1[0-2])', month):
-        raise SystemExit('月份格式错误，请使用 --month 2026-09')
-    if args.mode == 'verify':
-        return verify_month_output(month, Path(args.excel), Path(args.output_dir))
-    year = args.year or int(month[:4])
-    cfg = load_config(Path(args.config))
-    if args.max_pages:
-        cfg['max_pages'] = args.max_pages
-    if args.full_scan:
-        cfg['stop_after_known_pages'] = cfg['max_pages'] + 1
-    LOG.info('目标月份：%s；抓取年份：%d；执行模式：%s', month, year, args.mode)
-    backup_spreadsheet(Path(args.excel))
-    book = open_book(Path(args.excel))
-    with connect_db(Path(args.database)) as con:
+        args_parser().error('月份格式错误，请输入 YYYY-MM，例如 2026-09')
+
+    results = root / 'results'
+    excel = results / 'jiujiang_news.xlsx'
+    database = results / 'jiujiang_cache.sqlite3'
+    debug_dir = results / 'debug_html'
+
+    if args.verify:
+        return verify_month_output(month, excel, results)
+
+    mode = 'sync' if args.sync else 'export' if args.export else 'all'
+    cfg = load_config(root / 'config.json')
+    year = int(month[:4])
+    results.mkdir(parents=True, exist_ok=True)
+
+    LOG.info('目标月份：%s；模式：%s；输出目录：%s', month, mode, results)
+    backup_spreadsheet(excel)
+    book = open_book(excel)
+    with connect_db(database) as con:
         existing = existing_rows(book, con)
         session = build_session(cfg['user_agent'])
         new = {source: [] for source in SOURCES}
-        if args.mode != 'export':
-            new = crawl(session, con, existing, cfg, year, Path(args.debug_dir),
-                        month if args.only_month else None)
+        if mode != 'export':
+            # Scan only the chosen month, and fetch only that month's bodies.
+            new = crawl(session, con, existing, cfg, year, debug_dir, month)
             write_new_rows(book, new)
-            # Save the new listing first; failed article requests must not lose the work.
-            book.save(args.excel)
-            fetch_article_details(session, con, cfg, year, month, new, book, args.content_scope)
-        if args.mode == 'export':
-            # Manual review: skip listing refresh; only fetch needed article bodies.
+            book.save(excel)
             fetch_article_details(session, con, cfg, year, month, new, book, 'month')
-        # Always recompute matches from the current configuration; ignore old metadata.
+        else:
+            # Reuse cached news and honor manual selection in column E.
+            fetch_article_details(session, con, cfg, year, month, new, book, 'month')
+
         names = get_names(cfg)
         selected = refresh_book(book, con, names, cfg)
-        book.save(args.excel)
-        LOG.info('Excel已更新：%s；自动检测名单 %d 人', args.excel, len(names))
-        if args.mode != 'sync':
-            to_word, failed = deduplicate_for_month(selected, month)
-            output = build_word(month, to_word, Path(args.output_dir))
-            if output:
-                LOG.info('Word已生成：%s，%d 篇（按日期由早到晚、正文去重）', output, len(to_word))
+        book.save(excel)
+        LOG.info('Excel已更新：%s；配置姓名 %d 人', excel, len(names))
+        if mode != 'sync':
+            chosen, failed = deduplicate_for_month(selected, month)
+            word = build_word(month, chosen, results)
+            if word:
+                LOG.info('Word已生成：%s（%d篇，正文去重）', word, len(chosen))
             else:
-                LOG.warning('目标月份没有成功提取且符合收录条件的正文，未创建空Word')
+                LOG.warning('该月份没有成功提取并满足筛选条件的正文，未生成Word')
             if failed:
-                LOG.warning('有 %d 篇已选文章正文未抓取成功，本次未导出；下次会重试', len(failed))
-        LOG.info('完成。请在Excel中使用E列“收录/排除”，或保持旧版黄色标记进行人工修订。')
+                LOG.warning('有%d篇已选新闻正文抓取失败，将在下次运行时重试', len(failed))
+    LOG.info('完成。输出文件位于：%s', results)
     return 0
 
 

@@ -19,3 +19,4 @@ debug_html/
 .vscode/
 .DS_Store
 Thumbs.db
+results/
