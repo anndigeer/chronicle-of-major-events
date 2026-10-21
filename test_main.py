@@ -459,6 +459,84 @@ class TestJjxw(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertTrue((p / 'results' / '市委大事记（2026年9月）.docx').exists())
 
+    def test_existing_excel_does_not_overwrite_authoritative_cache(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            url = 'https://www.jjxw.cn/article/2026/09/19/100001.html'
+            second = 'https://www.jjxw.cn/article/2026/09/20/100002.html'
+            with j.connect_db(p / 'cache.sqlite3') as con:
+                con.execute(
+                    "INSERT INTO news(url,source,title,pub_date,article_title,"
+                    "body_json,status) VALUES(?,?,?,?,?,?,?)",
+                    (url, 'jjxw', '网站修订后的标题', '2026-09-19',
+                     '陈云在九江调研', json.dumps(
+                         ['9月17日，陈云在九江开展调研并主持会议。' * 8],
+                         ensure_ascii=False), '成功'))
+                book = j.open_book(p / 'news.xlsx')
+                ws = book.active
+                ws.cell(2, 1, 'Excel旧标题').hyperlink = url
+                ws.cell(2, 2, '2026-09-18')  # old, not authoritative
+                ws.cell(2, 5, '排除')
+                ws.cell(2, 7, url)
+                ws.cell(2, 9, '2026-09-17')  # verified event date
+                ws.cell(3, 1, 'Excel补录新文章').hyperlink = second
+                ws.cell(3, 2, '2026-09-20')
+                ws.cell(3, 7, second)
+                urls = j.existing_rows(book, con)
+                self.assertEqual(urls['jjxw'], {url, second})
+                existing = con.execute(
+                    "SELECT * FROM news WHERE url=?", (url,)).fetchone()
+                self.assertEqual(existing['title'], '网站修订后的标题')
+                self.assertEqual(existing['pub_date'], '2026-09-19')
+                self.assertEqual(existing['status'], '成功')
+                fresh = con.execute(
+                    "SELECT title,pub_date FROM news WHERE url=?",
+                    (second,)).fetchone()
+                self.assertEqual((fresh['title'], fresh['pub_date']),
+                                 ('Excel补录新文章', '2026-09-20'))
+                chosen = j.refresh_book(book, con, ['陈云'], j.config_defaults())
+                self.assertEqual(ws.cell(2, 2).value, '2026-09-19')
+                self.assertEqual(ws.cell(2, 9).value, '2026-09-17')
+                self.assertEqual(ws.cell(2, 5).value, '排除')
+                self.assertFalse(any(a['url'] == url for a in chosen))
+
+    def test_atomic_excel_save_retains_original_after_failed_serialization(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder) / 'jiujiang_news.xlsx'
+            book = j.open_book(p)
+            book.active.cell(2, 1, '人工保留的标题')
+            book.active.cell(2, 5, '收录')
+            j.save_book_atomic(book, p)
+            baseline = p.read_bytes()
+            book.active.cell(2, 1, '替换途中失败的数据')
+
+            def fail_mid_save(temp_path):
+                Path(temp_path).write_bytes(b'partial invalid XLSX')
+                raise OSError('模拟保存失败')
+
+            with patch.object(book, 'save', side_effect=fail_mid_save):
+                with self.assertRaises(OSError):
+                    j.save_book_atomic(book, p)
+            self.assertEqual(p.read_bytes(), baseline)
+            self.assertEqual(load_workbook(p).active['E2'].value, '收录')
+            self.assertFalse(list(Path(folder).glob('.jiujiang_news.*.xlsx')))
+
+    def test_atomic_excel_success_retains_manual_review(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder) / 'jiujiang_news.xlsx'
+            book = j.open_book(p)
+            book.active.cell(2, 5, '收录')
+            book.active.cell(2, 9, '2026-09-30')
+            book.active.cell(2, 9).comment = j.Comment(
+                'MANUAL_EVENT_DATE_REVIEW', '人工日期标记')
+            j.save_book_atomic(book, p)
+            reopened = load_workbook(p)
+            self.assertEqual(reopened.sheetnames, ['九江新闻网'])
+            self.assertEqual(reopened.active['E2'].value, '收录')
+            self.assertEqual(reopened.active['I2'].value, '2026-09-30')
+            self.assertEqual(reopened.active['I2'].comment.text,
+                             'MANUAL_EVENT_DATE_REVIEW')
+
     def test_news_json_api(self):
         obj = {'data': {'list': [
             {'fileID': 190001, 'publishTime': '2026-09-18 10:00:00',

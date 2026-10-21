@@ -12,6 +12,7 @@ import re
 import shutil
 import sqlite3
 import sys
+import tempfile
 import time
 import html
 from dataclasses import dataclass
@@ -481,9 +482,33 @@ def existing_rows(book, con: sqlite3.Connection) -> dict[str, set[str]]:
                 row[0].value = title
                 row[0].hyperlink = url
             if d and title:
-                upsert_news(con, News(source, title, url, d))
+                # Excel is a manual-review surface and may be stale.
+                # Use it to populate missing cache records only; the website
+                # listing remains authoritative for known title/date metadata.
+                con.execute(
+                    "INSERT OR IGNORE INTO news(url,source,title,pub_date) "
+                    "VALUES(?,?,?,?)", (url, source, title, d))
     con.commit()
     return urls
+
+
+def save_book_atomic(book, path: Path) -> None:
+    """Save beside the target, then atomically replace it when complete.
+
+    An interrupted or failed Excel write leaves the original intact.
+    Works on Windows and Linux without adding external dependencies.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+            prefix=f'.{path.stem}.', suffix=path.suffix,
+            dir=path.parent, delete=False) as handle:
+        temporary = Path(handle.name)
+    try:
+        book.save(temporary)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def write_new_rows(book, records: dict[str, list[News]]):
@@ -741,6 +766,10 @@ def refresh_book(book, con: sqlite3.Connection, names: list[str], cfg: dict) -> 
             row[2].value = '命中' if matches else ('待正文' if n['status'] != '成功' else '未命中')
             row[3].value = '、'.join(matches)
             row[5].value = n['status']
+            # B column is the site's publication date; manually reviewed
+            # event dates belong in column I and must remain untouched.
+            if row[1].value != n['pub_date']:
+                row[1].value = n['pub_date']
             row[6].value = url
             if n['status'] != '成功':
                 row[7].value = n['message']
@@ -1065,7 +1094,7 @@ def main(argv=None, *, base_dir: Path | None = None) -> int:
             new = crawl(session, con, existing, cfg, year, debug_dir, month,
                         status=crawl_status)
             write_new_rows(book, new)
-            book.save(excel)
+            save_book_atomic(book, excel)
             if crawl_status.get('complete') is False:
                 LOG.error('本次采集不完整：%s。已保存Excel和缓存，请稍后重试。',
                           crawl_status.get('error', '未知分页错误'))
@@ -1077,7 +1106,7 @@ def main(argv=None, *, base_dir: Path | None = None) -> int:
 
         names = get_names(cfg)
         selected = refresh_book(book, con, names, cfg)
-        book.save(excel)
+        save_book_atomic(book, excel)
         LOG.info('Excel已更新：%s；配置姓名 %d 人', excel, len(names))
         if mode != 'sync':
             chosen, failed = deduplicate_for_month(selected, month)
