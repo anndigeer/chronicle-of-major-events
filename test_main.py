@@ -207,6 +207,116 @@ class TestJjxw(unittest.TestCase):
             self.assertEqual(report['late_confirmed'], 2)
             self.assertEqual(report['word_articles'], 2)
 
+    def test_cached_pages_do_not_cut_off_unseen_news(self):
+        """Even 3+ known pages must not hide the older new target page."""
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            def rec(day, i):
+                return j.News('jjxw', f'新闻{i}',
+                              f'https://www.jjxw.cn/article/2026/09/20/{i}.html', day)
+            old_known = [rec('2026-09-29', 1), rec('2026-09-28', 2),
+                         rec('2026-09-27', 3)]
+            missing = rec('2026-09-20', 4)
+            pages = [
+                ([old_known[0]], True), ([old_known[1]], True),
+                ([old_known[2]], True), ([missing], True),
+                ([rec('2026-08-31', 5)], True)
+            ]
+            with j.connect_db(p / 'cache.sqlite3') as con:
+                cfg = dict(j.config_defaults(), max_pages=7, delay_seconds=0)
+                known = {'jjxw': {x.url for x in old_known}}
+                state = {}
+                with patch.object(j, 'fetch_list', side_effect=pages) as fetch:
+                    result = j.crawl(None, con, known, cfg, 2026, p,
+                                     '2026-09', status=state)
+                self.assertEqual(fetch.call_count, 5)
+                self.assertTrue(state['complete'])
+                self.assertEqual([x.url for x in result['jjxw']], [missing.url])
+
+    def test_list_page_failure_preserves_excel_and_returns_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            listing = j.News(
+                'jjxw', '陈云主持会议',
+                'https://www.jjxw.cn/article/2026/09/18/99101.html',
+                '2026-09-18')
+            # Successful first page, second page network failure.
+            with patch.object(j, 'fetch_list',
+                              side_effect=[([listing], True), ([], False)]), \
+                 patch.object(j, 'fetch_html',
+                              side_effect=AssertionError('body should not fetch')) as html:
+                result = j.main(['2026-09'], base_dir=p)
+            self.assertEqual(result, 1)
+            html.assert_not_called()
+            path = p / 'results' / 'jiujiang_news.xlsx'
+            self.assertTrue(path.exists())
+            wb = load_workbook(path)
+            self.assertEqual(wb.active['A2'].value, '陈云主持会议')
+            self.assertFalse(list((p / 'results').glob('*.docx')))
+
+    def test_max_page_limit_is_incomplete_not_success(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            cfg = dict(j.config_defaults(), max_pages=2, delay_seconds=0)
+            item = j.News('jjxw', '陈云主持会议',
+                          'https://www.jjxw.cn/article/2026/09/18/99101.html',
+                          '2026-09-18')
+            with j.connect_db(p / 'db.sqlite3') as con:
+                state = {}
+                with patch.object(j, 'fetch_list', return_value=([item], True)):
+                    j.crawl(None, con, {'jjxw': set()}, cfg, 2026,
+                            p, '2026-09', status=state)
+            self.assertFalse(state['complete'])
+            self.assertIn('max_pages', state['error'])
+
+    def test_auto_date_refresh_and_human_overrides_persist(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            cfg = dict(j.config_defaults(), names=['陈云'], delay_seconds=0)
+            url = 'https://www.jjxw.cn/article/2026/10/02/99401.html'
+            def body(day):
+                return [f'{day}，陈云在九江主持召开会议并部署重点工作。' * 6]
+            with j.connect_db(p / 'cache.sqlite3') as con:
+                con.execute(
+                    "INSERT INTO news(url,source,title,pub_date,article_title,body_json,status) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (url, 'jjxw', '陈云部署工作', '2026-10-02',
+                     '陈云部署工作', json.dumps(body('9月30日'), ensure_ascii=False),
+                     '成功'))
+                book = j.open_book(p / 'news.xlsx')
+                ws = book.active
+                ws.cell(2, 1, '陈云部署工作').hyperlink = url
+                ws.cell(2, 2, '2026-10-02')
+                ws.cell(2, 7, url)
+                def refresh():
+                    return j.refresh_book(book, con, ['陈云'], cfg)
+                refresh()
+                cell = ws.cell(2, 9)
+                self.assertEqual(cell.value, '2026-09-30')
+                self.assertTrue(cell.comment.text.startswith('AUTO_EVENT_DATE:'))
+                con.execute(
+                    "UPDATE news SET body_json=? WHERE url=?",
+                    (json.dumps(body('9月29日'), ensure_ascii=False), url))
+                refresh()
+                self.assertEqual(cell.value, '2026-09-29')
+                # Explicit deletion of a machine guess requests human review.
+                cell.value = None
+                refresh()
+                self.assertIsNone(cell.value)
+                self.assertIn('MANUAL_EVENT_DATE_REVIEW', cell.comment.text)
+                refresh()
+                self.assertIsNone(cell.value)
+                # A new manually chosen date must never be overwritten.
+                cell.value = '2026-09-28'
+                refresh()
+                self.assertEqual(cell.value, '2026-09-28')
+                self.assertIsNone(cell.comment)
+                con.execute(
+                    "UPDATE news SET body_json=? WHERE url=?",
+                    (json.dumps(body('9月27日'), ensure_ascii=False), url))
+                refresh()
+                self.assertEqual(cell.value, '2026-09-28')
+
     def test_news_json_api(self):
         obj = {'data': {'list': [
             {'fileID': 190001, 'publishTime': '2026-09-18 10:00:00',

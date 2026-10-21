@@ -9,7 +9,6 @@
   ],
   "include_body_matches": true,
   "max_pages": 170,
-  "stop_after_known_pages": 3,
   "delay_seconds": 0.4,
   "timeout_seconds": 20,
   "late_publication_days": 10

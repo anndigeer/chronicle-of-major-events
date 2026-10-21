@@ -28,6 +28,7 @@ from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.comments import Comment
 from openpyxl.worksheet.datavalidation import DataValidation
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -100,7 +101,6 @@ def config_defaults() -> dict:
         'names': DEFAULT_NAMES,
         'include_body_matches': True,
         'max_pages': 170,
-        'stop_after_known_pages': 3,
         'late_publication_days': 10,
         'delay_seconds': 0.4,
         'timeout_seconds': 20,
@@ -533,18 +533,29 @@ def infer_event_date(title: str, paragraphs: list[str], publication: str,
 
 def crawl(session: requests.Session, con: sqlite3.Connection,
           known: dict[str, set[str]], cfg: dict, year: int, debug: Path,
-          target_month: str | None = None) -> dict[str, list[News]]:
+          target_month: str | None = None, *, status: dict | None = None
+          ) -> dict[str, list[News]]:
+    """Scan through the full date window, even when intermediate pages are cached.
+
+    Record completion status instead of silently accepting partial pagination.
+    Every successfully fetched page is committed to SQLite; the caller can
+    persist new Excel rows before reporting a failure.
+    """
     source = 'jjxw'
     new = {source: []}
-    known_pages = 0
-    window_start, window_end = publication_window(target_month, cfg['late_publication_days'])
+    window_start, window_end = publication_window(
+        target_month or f'{year}-01', cfg['late_publication_days'])
+    complete = False
+    error = ''
     for page in range(cfg['max_pages']):
         news, ok = fetch_list(session, page, cfg, debug)
-        if not ok or not news:
+        if not ok:
+            error = f'新闻网第{page + 1}页请求失败，采集不完整'
+            break
+        if not news:
+            complete = True  # API reached the end of the listing
             break
         current = [n for n in news if window_start <= n.pub_date <= window_end]
-        old = bool(current) and all(n.url in known[source] for n in current)
-        older = all(n.pub_date < window_start for n in news)
         count = 0
         for n in current:
             if n.url not in known[source]:
@@ -553,17 +564,23 @@ def crawl(session: requests.Session, con: sqlite3.Connection,
                 count += 1
             upsert_news(con, n)
         con.commit()
-        LOG.info('第%d页：共%d条，目标范围%d条，新%d条',
+        LOG.info('第%d页：解析%d条，时间范围内%d条，新%d条',
                  page + 1, len(news), len(current), count)
-        if older:
+        if all(n.pub_date < window_start for n in news):
+            complete = True  # All records on this page predate the window.
             break
-        known_pages = known_pages + 1 if old else 0
-        if known_pages >= cfg['stop_after_known_pages']:
-            break
+        # Never stop simply because pages are already cached: that can skip
+        # unseen articles further down in the target month.
         if cfg['delay_seconds']:
             time.sleep(cfg['delay_seconds'])
     else:
-        LOG.warning('达到 max_pages=%d，可能遗漏更早新闻', cfg['max_pages'])
+        error = (f'已达到最大分页数 max_pages={cfg["max_pages"]}，'
+                 '尚未扫描到目标月份之前的记录，结果可能不完整')
+    if status is not None:
+        status['complete'] = complete
+        status['error'] = error
+    if error:
+        LOG.error('%s；已获取的新闻仍可保留在Excel和SQLite中', error)
     return new
 
 
@@ -631,18 +648,47 @@ def refresh_book(book, con: sqlite3.Connection, names: list[str], cfg: dict) -> 
             paras = json.loads(n['body_json'] or '[]')
             matches = match_names(n['article_title'] or n['title'], '\n'.join(paras), names, cfg['include_body_matches'])
             choose = selection(row)
-            # Column I is editable. A valid manual date always wins; otherwise
-            # infer only when the report contains a clear lead-date action.
-            raw_event = row[8].value
+            # Column I: preserve human edits, recalculate machine guesses.
+            # The comment stores our last guess. If the value differs, it
+            # was edited manually and should never be overwritten.
+            event_cell = row[8]
+            raw_event = event_cell.value
             event_day = (raw_event.strftime('%Y-%m-%d')
                          if isinstance(raw_event, (date, datetime))
                          else date_from_text(str(raw_event or '')))
-            if not event_day and n['status'] == '成功':
-                event_day = infer_event_date(
+            auto_marker = 'AUTO_EVENT_DATE:'
+            prev_guess = ''
+            if event_cell.comment:
+                text = event_cell.comment.text
+                if text.startswith(auto_marker):
+                    prev_guess = text[len(auto_marker):].splitlines()[0].strip()
+            if prev_guess:
+                if event_day == prev_guess:
+                    # Still machine-owned: refresh the guess from latest body.
+                    event_day = ''
+                    event_cell.value = None
+                    event_cell.comment = None
+                else:
+                    # User has changed or cleared our suggested date.
+                    event_cell.comment = None
+                    if not event_day:
+                        # Clearing a suggestion explicitly asks for review,
+                        # not automatic regeneration on the same refresh.
+                        event_cell.comment = Comment(
+                            'MANUAL_EVENT_DATE_REVIEW', '人工日期标记')
+            needs_manual_review = bool(
+                event_cell.comment and
+                event_cell.comment.text.startswith('MANUAL_EVENT_DATE_REVIEW'))
+            if not event_day and not needs_manual_review and n['status'] == '成功':
+                inferred = infer_event_date(
                     n['article_title'] or n['title'], paras, n['pub_date'],
                     cfg['late_publication_days'])
-                if event_day:
-                    row[8].value = event_day
+                if inferred:
+                    event_day = inferred
+                    event_cell.value = inferred
+                    event_cell.comment = Comment(
+                        auto_marker + inferred + '\n自动推断，请核实或直接修改单元格。',
+                        '采集程序')
             effective_day = event_day or n['pub_date']
             selected = choose == 'include' or (choose == 'auto' and bool(matches))
             row[2].value = '命中' if matches else ('待正文' if n['status'] != '成功' else '未命中')
@@ -964,10 +1010,17 @@ def main(argv=None, *, base_dir: Path | None = None) -> int:
         session = build_session(cfg['user_agent'])
         new = {source: [] for source in SOURCES}
         if mode != 'export':
-            # Scan only the chosen month, and fetch only that month's bodies.
-            new = crawl(session, con, existing, cfg, year, debug_dir, month)
+            # Scan the complete month + grace window, then preserve pages even
+            # if a later API request fails. Do not issue a misleading Word.
+            crawl_status = {}
+            new = crawl(session, con, existing, cfg, year, debug_dir, month,
+                        status=crawl_status)
             write_new_rows(book, new)
             book.save(excel)
+            if crawl_status.get('complete') is False:
+                LOG.error('本次采集不完整：%s。已保存Excel和缓存，请稍后重试。',
+                          crawl_status.get('error', '未知分页错误'))
+                return 1
             fetch_article_details(session, con, cfg, year, month, new, book, 'month')
         else:
             # Reuse cached news and honor manual selection in column E.
