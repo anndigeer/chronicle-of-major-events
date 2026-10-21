@@ -2,11 +2,12 @@ name: Python CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
       live_smoke:
-        description: 'Also check the two public news websites'
+        description: 'Check real news sites (may fail if sites block CI)'
         type: boolean
         default: false
         required: false
@@ -16,9 +17,9 @@ permissions:
 
 jobs:
   unit-tests:
-    name: Unit + offline full pipeline (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    name: Offline tests / ${{ matrix.os }} / Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 12
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -30,32 +31,43 @@ jobs:
           - os: windows-latest
             python-version: '3.12'
     steps:
-      - name: Checkout
+      - name: Checkout complete repository
         uses: actions/checkout@v4
-      - name: Set up Python
+
+      - name: Configure Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: requirements_v2.txt
+
       - name: Install dependencies
         run: python -m pip install -r requirements_v2.txt
-      - name: Check Python syntax
-        run: python -m compileall -q jrjj_v2.py test_jrjj_v2.py scripts/live_smoke.py
-      - name: Run offline tests
-        run: python -m unittest discover -v -p 'test_*.py'
-      - name: Check CLI help
+
+      - name: Check dependency compatibility
+        run: python -m pip check
+
+      - name: Check repository completeness and environment
+        run: python scripts/check_ci.py
+
+      - name: Check script syntax
+        run: python -m compileall -q jrjj_v2.py test_jrjj_v2.py scripts/
+
+      - name: Run six offline regression tests
+        run: python -m unittest -v test_jrjj_v2
+
+      - name: Check command-line interface
         run: python jrjj_v2.py --help
 
   live-smoke:
-    name: Optional real-website smoke test
-    if: github.event_name == 'workflow_dispatch' && inputs.live_smoke
+    name: Optional live website verification
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.live_smoke }}
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Set up Python
+      - name: Configure Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -63,5 +75,5 @@ jobs:
           cache-dependency-path: requirements_v2.txt
       - name: Install dependencies
         run: python -m pip install -r requirements_v2.txt
-      - name: Check both live lists and sample articles
+      - name: Verify public news sources and article extraction
         run: python scripts/live_smoke.py
