@@ -15,6 +15,11 @@ on:
 permissions:
   contents: read
 
+# Windows runners otherwise may default to cp1252 when Python writes Chinese CLI help.
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: 'utf-8'
+
 jobs:
   unit-tests:
     name: Offline tests / ${{ matrix.os }} / Python ${{ matrix.python-version }}
