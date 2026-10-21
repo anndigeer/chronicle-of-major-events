@@ -102,7 +102,7 @@ class TestJrjj(unittest.TestCase):
         self.assertEqual(request_get.call_count, 1)
 
     def test_curl_uses_authorized_headers_without_process_arg_leaks(self):
-        response = CompletedProcess(['curl'], 0, stdout=GOV_XML.encode('utf-8'), stderr=b'')
+        response = subprocess.CompletedProcess(['curl'], 0, stdout=GOV_XML.encode('utf-8'), stderr=b'')
         secrets = {'JIUJIANG_API_KEY': 'example-test-key',
                    'JIUJIANG_COOKIE': 'example-test-cookie'}
         with patch.dict(os.environ, secrets), patch.object(j.subprocess, 'run',
