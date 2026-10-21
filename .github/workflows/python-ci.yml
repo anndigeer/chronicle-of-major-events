@@ -50,7 +50,7 @@ jobs:
       - name: Check script syntax
         run: python -m compileall -q jrjj_v2.py test_jrjj_v2.py scripts/
 
-      - name: Run six offline regression tests
+      - name: Run seven offline regression tests
         run: python -m unittest -v test_jrjj_v2
 
       - name: Check command-line interface
