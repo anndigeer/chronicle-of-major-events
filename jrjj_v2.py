@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from contextlib import contextmanager
 import logging
 import re
 import shutil
@@ -394,26 +395,41 @@ def parse_article(html: str, fallback_title: str) -> tuple[str, list[str], str]:
     return title or fallback_title, paragraphs, selector
 
 
-def connect_db(path: Path) -> sqlite3.Connection:
+@contextmanager
+def connect_db(path: Path):
+    """Manage a SQLite transaction AND close its file handle on all platforms.
+
+    sqlite3.Connection.__exit__ commits/rolls back, but does not close the
+    connection. Without an explicit close, Windows retains a lock on the
+    database file and temporary-directory cleanup fails with WinError 32.
+    """
     con = sqlite3.connect(path)
-    con.row_factory = sqlite3.Row
-    con.executescript('''
-        CREATE TABLE IF NOT EXISTS news (
-            url TEXT PRIMARY KEY,
-            source TEXT NOT NULL,
-            title TEXT NOT NULL,
-            pub_date TEXT NOT NULL,
-            article_title TEXT DEFAULT '',
-            body_json TEXT DEFAULT '',
-            status TEXT DEFAULT '未抓取',
-            message TEXT DEFAULT '',
-            fetched_at TEXT DEFAULT '',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE INDEX IF NOT EXISTS idx_news_month ON news(pub_date, source);
-        CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-    ''')
-    return con
+    try:
+        con.row_factory = sqlite3.Row
+        con.executescript('''
+            CREATE TABLE IF NOT EXISTS news (
+                url TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                title TEXT NOT NULL,
+                pub_date TEXT NOT NULL,
+                article_title TEXT DEFAULT '',
+                body_json TEXT DEFAULT '',
+                status TEXT DEFAULT '未抓取',
+                message TEXT DEFAULT '',
+                fetched_at TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_news_month ON news(pub_date, source);
+            CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        ''')
+        try:
+            yield con
+            con.commit()
+        except BaseException:
+            con.rollback()
+            raise
+    finally:
+        con.close()
 
 
 def upsert_news(con: sqlite3.Connection, record: News) -> bool:
