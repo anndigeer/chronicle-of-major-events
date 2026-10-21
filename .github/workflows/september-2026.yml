@@ -1,0 +1,102 @@
+name: September 2026 real news extraction
+
+on:
+  push:
+    branches: [actions/september-2026-extract]
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/september-2026.yml'
+      - 'jrjj_v2.py'
+      - 'scripts/verify_month_output.py'
+      - 'config_september_2026.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: september-2026-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    name: Crawl two live sources and export September 2026
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements_v2.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements_v2.txt
+
+      - name: Crawl September 2026 and generate Excel and Word
+        id: crawl
+        shell: bash
+        continue-on-error: true
+        run: |
+          mkdir -p output
+          set -o pipefail
+          python -u jrjj_v2.py \
+            --month 2026-09 \
+            --year 2026 \
+            --only-month \
+            --content-scope month \
+            --config config_september_2026.json \
+            --excel output/jiujiang_news.xlsx \
+            --database output/jiujiang_cache.sqlite3 \
+            --output-dir output \
+            --debug-dir output/debug_html \
+            --max-pages 110 2>&1 | tee output/抓取运行日志.txt
+
+      - name: Verify output files, dates, and content
+        id: verify
+        shell: bash
+        continue-on-error: true
+        run: python scripts/verify_month_output.py --month 2026-09 --folder output
+
+      - name: Upload generated Excel and Word files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 九江市委大事记-2026年9月-Excel-Word
+          path: |
+            output/*.xlsx
+            output/*.docx
+            output/抓取检查报告.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload logs and replay cache
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 2026-09-crawl-logs-and-cache
+          path: |
+            output/抓取运行日志.txt
+            output/debug_html/
+            output/jiujiang_cache.sqlite3
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail workflow when crawling or verification failed
+        if: always()
+        shell: bash
+        env:
+          CRAWL_STATUS: ${{ steps.crawl.outcome }}
+          VERIFY_STATUS: ${{ steps.verify.outcome }}
+        run: |
+          echo "Crawl: $CRAWL_STATUS; validation: $VERIFY_STATUS"
+          test "$CRAWL_STATUS" = success
+          test "$VERIFY_STATUS" = success
