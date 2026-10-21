@@ -1,0 +1,81 @@
+name: September 2026 News Export
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      month:
+        description: 'Target month (YYYY-MM)'
+        required: true
+        default: '2026-09'
+        type: string
+      max_pages:
+        description: 'Maximum listing pages per source'
+        required: true
+        default: '120'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'automation/september-2026-export' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      PYTHONIOENCODING: utf-8
+      TARGET_MONTH: ${{ inputs.month || '2026-09' }}
+      MAX_PAGES: ${{ inputs.max_pages || '120' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements_v2.txt
+      - name: Install dependencies
+        run: python -m pip install -r requirements_v2.txt
+      - name: Crawl both sources and generate September 2026 documents
+        shell: bash
+        run: |
+          mkdir -p output debug_html
+          set -o pipefail
+          python jrjj_v2.py --month "$TARGET_MONTH" --year 2026 --mode all --content-scope month --max-pages "$MAX_PAGES" --full-scan --excel output/jiujiang_news.xlsx --database output/jiujiang_cache.sqlite3 --output-dir output --debug-dir debug_html 2>&1 | tee output/crawl.log
+      - name: Summarize actual outputs
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from openpyxl import load_workbook
+          p=Path('output')
+          for x in sorted(p.glob('*')):
+              print(f'{x.name}: {x.stat().st_size} bytes')
+          book=p/'jiujiang_news.xlsx'
+          if book.exists():
+              w=load_workbook(book,read_only=True)
+              for ws in w:
+                  print(f'{ws.title}: {ws.max_row-1} rows')
+          docs=list(p.glob('*.docx'))
+          print(f'Word documents: {len(docs)}')
+          PY
+      - name: Publish generated Word Excel logs and cache
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: september-2026-news-export
+          path: |
+            output/*.docx
+            output/*.xlsx
+            output/*.log
+            output/*.sqlite3
+            debug_html/**
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Verify outputs exist
+        shell: bash
+        run: |
+          test -s output/jiujiang_news.xlsx
+          compgen -G "output/*.docx" >/dev/null || { echo "No Word generated: inspect crawl.log and Excel." >&2; exit 1; }
