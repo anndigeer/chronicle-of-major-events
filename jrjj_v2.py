@@ -889,7 +889,23 @@ def main(argv=None) -> int:
     return 0
 
 
+def configure_cli_encoding() -> None:
+    """Make Chinese terminal output safe in Windows CI and redirected consoles.
+
+    Some Windows environments default to cp1252. Setting the encoding before
+    argparse handles --help prevents UnicodeEncodeError without requiring the
+    caller to manually change the system code page.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            try:
+                stream.reconfigure(encoding='utf-8', errors='backslashreplace')
+            except (OSError, ValueError):
+                pass
+
+
 if __name__ == '__main__':
+    configure_cli_encoding()
     try:
         sys.exit(main())
     except KeyboardInterrupt:
