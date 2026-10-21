@@ -15,6 +15,11 @@ on:
 permissions:
   contents: read
 
+# Windows runners otherwise may default to cp1252 when Python writes Chinese CLI help.
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: 'utf-8'
+
 jobs:
   unit-tests:
     name: Offline tests / ${{ matrix.os }} / Python ${{ matrix.python-version }}
@@ -50,11 +55,13 @@ jobs:
       - name: Check script syntax
         run: python -m compileall -q jrjj_v2.py test_jrjj_v2.py scripts/
 
-      - name: Run six offline regression tests
+      - name: Run eight offline regression tests
         run: python -m unittest -v test_jrjj_v2
 
-      - name: Check command-line interface
+      - name: Check command-line interface with legacy Windows codepage
         run: python jrjj_v2.py --help
+        env:
+          PYTHONIOENCODING: cp1252
 
   live-smoke:
     name: Optional live website verification

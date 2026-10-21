@@ -1,5 +1,9 @@
 """Offline regression tests for dual-source scraper."""
 import json
+import os
+import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +20,31 @@ ARTICLE_JJ='''<html><h1>陈云在九江调研</h1><div class="article-content"><
 ARTICLE_OTHER='''<html><h1>另一条普通新闻</h1><div id="artibody"><p>今天上午，多部门组织开展环境卫生改善行动，推动辖区生产生活环境进一步改善。</p><p>有关部门研究部署了下一阶段工作重点，确定任务分工和落实计划，现场检查了重点区域。</p></div></html>'''
 
 class TestJrjj(unittest.TestCase):
+    def test_cli_help_with_cp1252_output(self):
+        """Chinese argparse help must print even when inherited output is cp1252."""
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'cp1252'
+        result = subprocess.run(
+            [sys.executable, str(Path(j.__file__).resolve()), '--help'],
+            capture_output=True, env=env, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode('utf-8', errors='replace'))
+        self.assertIn('抓取', result.stdout.decode('utf-8'))
+
+    def test_sqlite_context_releases_file_handle(self):
+        """The database must be closed, not merely committed, on Windows."""
+        with tempfile.TemporaryDirectory() as folder:
+            db = Path(folder) / 'lock_test.sqlite3'
+            with j.connect_db(db) as connection:
+                connection.execute(
+                    "INSERT INTO metadata(key,value) VALUES(?,?)",
+                    ('close_test', 'ok')
+                )
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute("SELECT 1")
+            db.unlink()
+            self.assertFalse(db.exists())
+
     def test_parse_redesigned_gov(self):
         items=j.parse_listing(GOV_HTML,'gov',j.SOURCES['gov']['base'])
         self.assertEqual(len(items),2)
