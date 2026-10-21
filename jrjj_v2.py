@@ -267,8 +267,10 @@ def fetch_gov_xml_with_curl(url: str, timeout: int) -> bytes:
         raise RuntimeError(f'curl 下载政府 XML 失败（退出码 {exc.returncode}）：{stderr}') from exc
     if not done.stdout.strip():
         raise ValueError('curl 返回空 XML')
-    # Fail early for HTML error pages masquerading as HTTP 200.
-    parse_gov_xml(done.stdout)
+    # Fail early for HTML error pages masquerading as HTTP 200, as well as XML
+    # feeds that contain no valid government article entries.
+    if not parse_gov_xml(done.stdout):
+        raise ValueError('curl 响应不是有效的政府新闻 XML（未找到 PUBURL 记录）')
     return done.stdout
 
 
