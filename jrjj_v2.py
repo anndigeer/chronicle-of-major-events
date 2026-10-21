@@ -832,26 +832,70 @@ def canonical_title(title: str) -> str:
     return re.sub(r'[\W_]+', '', (title or '').lower())
 
 
+def canonical_body(body: list[str]) -> str:
+    """Ignore layout whitespace and punctuation when comparing full articles."""
+    return re.sub(r'[\W_]+', '', '\n'.join(body).lower())
+
+
+def _similar_article_body(a: str, b: str) -> bool:
+    """Require substantial content overlap to deduplicate equal headlines.
+
+    This prevents two different meetings with the same generic title from
+    being collapsed merely because they were published close together.
+    """
+    if not a or not b:
+        return False
+    if a == b and len(a) >= 65:
+        return True
+    if min(len(a), len(b)) < 100:
+        return False
+    a_pairs = {a[i:i + 2] for i in range(len(a) - 1)}
+    b_pairs = {b[i:i + 2] for i in range(len(b) - 1)}
+    if not a_pairs or not b_pairs:
+        return False
+    shared = len(a_pairs & b_pairs)
+    # Bigrams capture repeated sentences despite small editor/byline differences.
+    return shared / len(a_pairs | b_pairs) >= 0.90
+
+
+def _same_news_story(a: dict, b: dict) -> bool:
+    a_body, b_body = canonical_body(a['body']), canonical_body(b['body'])
+    # Reposting identical substantial body text under a different headline is
+    # still one story, even if publication dates or titles differ.
+    if a_body == b_body and len(a_body) >= 65:
+        return True
+    if canonical_title(a['title']) != canonical_title(b['title']):
+        return False
+    if abs((date.fromisoformat(a['date']) - date.fromisoformat(b['date'])).days) > 2:
+        return False
+    return _similar_article_body(a_body, b_body)
+
+
 def deduplicate_for_month(selected: list[dict], month: str) -> tuple[list[dict], list[dict]]:
-    articles = []
-    failed = []
-    for n in sorted((x for x in selected if x['date'].startswith(month)), key=lambda x: (x['date'], x['title'])):
-        if n['status'] != '成功' or not n['body']:
-            failed.append(n)
+    """Return distinct articles for Word, leaving all source rows in Excel."""
+    articles: list[dict] = []
+    failed: list[dict] = []
+    duplicates = 0
+    eligible = sorted((x for x in selected if x['date'].startswith(month)),
+                      key=lambda x: (x['date'], x['title']))
+    for item in eligible:
+        if item['status'] != '成功' or not item['body']:
+            failed.append(item)
             continue
-        key = canonical_title(n['title'])
-        match_idx = None
-        for idx, seen in enumerate(articles):
-            if canonical_title(seen['title']) != key:
-                continue
-            if abs((date.fromisoformat(seen['date']) - date.fromisoformat(n['date'])).days) <= 2:
-                match_idx = idx
-                break
+        match_idx = next((i for i, seen in enumerate(articles)
+                          if _same_news_story(seen, item)), None)
         if match_idx is None:
-            articles.append(n)
-        elif (len(''.join(n['body'])), n['source'] == 'gov') > (len(''.join(articles[match_idx]['body'])), articles[match_idx]['source'] == 'gov'):
-            articles[match_idx] = n
+            articles.append(item)
+            continue
+        duplicates += 1
+        seen = articles[match_idx]
+        # Keep the more complete正文; on a tie, prefer the government source.
+        if (len(canonical_body(item['body'])), item['source'] == 'gov') > (
+                len(canonical_body(seen['body'])), seen['source'] == 'gov'):
+            articles[match_idx] = item
     articles.sort(key=lambda x: (x['date'], x['title']))
+    LOG.info('Word 跨来源去重：候选正文 %d 篇，合并重复 %d 篇，最终保留 %d 篇',
+             len(eligible) - len(failed), duplicates, len(articles))
     return articles, failed
 
 

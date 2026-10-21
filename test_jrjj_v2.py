@@ -293,6 +293,43 @@ class TestJrjj(unittest.TestCase):
                 j.build_word('2026-10',articles,p)
                 self.assertEqual(len(list((p/'备份').glob('*.docx'))),1)
 
+    def test_cross_source_dedup_by_title_and_body(self):
+        def record(source, title, day, text, status='成功'):
+            return {'source': source, 'url': source + title, 'date': day,
+                    'title': title, 'body': [text], 'status': status,
+                    'matches': ['陈云']}
+        body = '陈云对全市重点项目进行实地调研并提出具体要求，推动高质量发展。' * 5
+        changed = '陈云主持另外一次会议，研究审议不同政策和工作方案。' * 5
+        items = [
+            record('jjxw', '陈云赴基层调研', '2026-09-10', body),
+            record('gov', '陈云赴基层调研', '2026-09-11', body),
+            record('jjxw', '陈云调研重点项目', '2026-09-12', body),
+            record('gov', '陈云赴基层调研', '2026-09-10', changed),
+        ]
+        articles, failed = j.deduplicate_for_month(items, '2026-09')
+        self.assertEqual(len(articles), 2)
+        self.assertFalse(failed)
+        self.assertIn(changed, [a['body'][0] for a in articles])
+        self.assertEqual(next(a for a in articles if a['body'][0] == body)['source'], 'gov')
+
+    def test_dedup_punctuation_minor_edits_and_month_filter(self):
+        body = ('陈云出席市委专题会议并讲话，各单位认真学习贯彻会议精神。' * 8)
+        altered = body.replace('，', '，\n').replace('市委专题会议', '市委重要专题会议', 1)
+        def item(source, title, date, text, status='成功'):
+            return {'source': source, 'title': title, 'date': date,
+                    'body': [text], 'status': status, 'matches': ['陈云'], 'url': source + date}
+        stories = [
+            item('jjxw', '陈云 召开专题会议', '2026-09-05', body),
+            item('gov', '陈云召开专题会议！', '2026-09-06', altered),
+            item('jjxw', '陈云召开专题会议', '2026-09-20', body.replace('讲话', '调研')),
+            item('gov', '未抓取成功', '2026-09-08', [], '失败'),
+            item('gov', '不同月份', '2026-10-02', body)
+        ]
+        articles, failed = j.deduplicate_for_month(stories, '2026-09')
+        self.assertEqual(len(articles), 2)
+        self.assertEqual(len(failed), 1)
+        self.assertTrue(all(a['date'].startswith('2026-09') for a in articles))
+
     def test_fake_full_pipeline(self):
         with tempfile.TemporaryDirectory() as folder:
             p=Path(folder)
