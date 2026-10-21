@@ -263,7 +263,11 @@ class TestJjxw(unittest.TestCase):
                           '2026-09-18')
             with j.connect_db(p / 'db.sqlite3') as con:
                 state = {}
-                with patch.object(j, 'fetch_list', return_value=([item], True)):
+                second = j.News('jjxw', '陈云参加会议',
+                                    'https://www.jjxw.cn/article/2026/09/17/99102.html',
+                                    '2026-09-17')
+                with patch.object(j, 'fetch_list', side_effect=[
+                    ([item], True), ([second], True)]):
                     j.crawl(None, con, {'jjxw': set()}, cfg, 2026,
                             p, '2026-09', status=state)
             self.assertFalse(state['complete'])
