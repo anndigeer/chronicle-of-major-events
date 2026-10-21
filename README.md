@@ -30,3 +30,7 @@ python jrjj_v2.py --month 2026-09         # 指定月份
 ## 数据安全
 
 仓库只提交程序、配置示例、说明和测试代码；`.gitignore` 排除个人 Excel、Word、数据库、备份及调试 HTML。不要将 GitHub PAT 放入代码、配置或 Actions YAML；CI 只使用 GitHub 提供的最小读取权限。
+
+## 持续集成验证
+
+在 GitHub Actions 的 **Python CI** 中检查 Ubuntu Python 3.10 / 3.12 和 Windows Python 3.12 的离线回归测试。网站连通性测试默认不运行，可在手动启动工作流时勾选 `live_smoke`。初次上传各文件时触发的早期失败记录不代表最新版本的状态，应查看最新提交对应的运行。
