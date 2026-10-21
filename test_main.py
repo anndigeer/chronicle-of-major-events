@@ -47,6 +47,166 @@ class TestJjxw(unittest.TestCase):
             self.assertTrue((p / 'results' / 'jiujiang_cache.sqlite3').exists())
             self.assertEqual(crawl.call_args.args[-1], '2026-09')
 
+    def test_grace_window_inclusive_and_cross_year(self):
+        self.assertEqual(j.publication_window('2026-09', 10),
+                         ('2026-09-01', '2026-10-10'))
+        self.assertEqual(j.publication_window('2026-09', 0),
+                         ('2026-09-01', '2026-09-30'))
+        self.assertEqual(j.publication_window('2026-12', 10),
+                         ('2026-12-01', '2027-01-10'))
+
+    def test_event_date_from_lead_and_relative_day(self):
+        self.assertEqual(j.infer_event_date(
+            '陈云赴九江调研',
+            ['本报讯（记者某某）9月30日，陈云到九江调研并讲话。'],
+            '2026-10-02'), '2026-09-30')
+        self.assertEqual(j.infer_event_date(
+            '邓永翔主持会议', ['昨日，邓永翔主持召开专题会议。'],
+            '2026-10-01'), '2026-09-30')
+        self.assertEqual(j.infer_event_date(
+            '陈云主持会议', ['12月31日，陈云主持召开专题会议。'],
+            '2027-01-04'), '2026-12-31')
+        self.assertEqual(j.infer_event_date(
+            '某事项继续推进', ['此前9月30日的统计数字显示全市情况。'],
+            '2026-10-04'), '')
+
+    def test_future_schedule_and_october_event_not_backdated(self):
+        self.assertEqual(j.infer_event_date(
+            '会议计划', ['将于9月30日举行新闻发布会。'],
+            '2026-10-02'), '')
+        self.assertEqual(j.infer_event_date(
+            '会议', ['10月2日，陈云主持召开会议。'],
+            '2026-10-03'), '2026-10-02')
+        self.assertEqual(j.infer_event_date(
+            '工作', ['9月30日，陈云主持召开会议。'],
+            '2026-10-11'), '')  # More than the 10-day lag
+
+    def test_list_crawl_includes_october_10_not_11(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            source = 'jjxw'
+            def record(day, id_):
+                return j.News(source, '陈云调研', f'https://www.jjxw.cn/article/{id_}.html', day)
+            listing = [record('2026-10-11', 11),
+                       record('2026-10-10', 10),
+                       record('2026-10-01', 1),
+                       record('2026-09-30', 30),
+                       record('2026-09-01', 101),
+                       record('2026-08-31', 831)]
+            cfg = dict(j.config_defaults(), max_pages=3, delay_seconds=0)
+            with j.connect_db(p / 'cache.sqlite3') as con:
+                with patch.object(j, 'fetch_list', side_effect=[
+                    (listing, True), ([], True)
+                ]):
+                    found = j.crawl(None, con, {'jjxw': set()}, cfg,
+                                    2026, p / 'debug', '2026-09')
+                    months = {n.pub_date for n in found['jjxw']}
+            self.assertEqual(months,
+                             {'2026-09-01', '2026-09-30',
+                              '2026-10-01', '2026-10-10'})
+
+    def test_next_year_cached_articles_have_body_requested(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            cfg = dict(j.config_defaults(), delay_seconds=0)
+            with j.connect_db(p / 'db.sqlite3') as con:
+                url = 'https://www.jjxw.cn/article/2027/01/04/90001.html'
+                con.execute("INSERT INTO news(url,source,title,pub_date) VALUES(?,?,?,?)",
+                            (url, 'jjxw', '陈云召开会议', '2027-01-04'))
+                book = j.open_book(p / 'news.xlsx')
+                article_html = article('陈云召开会议',
+                    '12月31日，陈云主持召开市委常委会会议并部署重点工作。' * 6)
+                with patch.object(j, 'fetch_html', return_value=article_html) as fetch:
+                    j.fetch_article_details(j.build_session('agent'), con, cfg,
+                        2026, '2026-12', {'jjxw': []}, book, 'month')
+                    fetch.assert_called_once()
+                actual = con.execute("SELECT status FROM news WHERE url=?", (url,)).fetchone()
+                self.assertEqual(actual['status'], '成功')
+
+    def test_late_news_requires_september_event_date_or_manual_review(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            cfg = dict(j.config_defaults(), names=['陈云'], delay_seconds=0)
+            url = 'https://www.jjxw.cn/article/2026/10/05/91005.html'
+            with j.connect_db(p / 'cache.sqlite3') as con:
+                con.execute(
+                    "INSERT INTO news(url,source,title,pub_date,article_title,body_json,status) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (url, 'jjxw', '陈云部署工作', '2026-10-05',
+                     '陈云部署工作',
+                     json.dumps(['近日，陈云研究推进相关工作的情况。' * 8],
+                                ensure_ascii=False), '成功'))
+                book = j.open_book(p / 'data.xlsx')
+                ws = book.active
+                ws.cell(2, 1, '陈云部署工作')
+                ws.cell(2, 1).hyperlink = url
+                ws.cell(2, 2, '2026-10-05')
+                ws.cell(2, 7, url)
+                chosen = j.refresh_book(book, con, ['陈云'], cfg)
+                self.assertEqual(len(chosen), 1)
+                self.assertEqual(chosen[0]['date'], '2026-10-05')
+                self.assertEqual(j.deduplicate_for_month(chosen, '2026-09')[0], [])
+                self.assertFalse(ws.cell(2, 9).value)
+                # Manual verification: column I date plus column E include.
+                ws.cell(2, 9, '2026-09-29')
+                ws.cell(2, 5, '收录')
+                chosen = j.refresh_book(book, con, ['陈云'], cfg)
+                articles, failures = j.deduplicate_for_month(chosen, '2026-09')
+                self.assertEqual((len(articles), len(failures)), (1, 0))
+                self.assertEqual(articles[0]['date'], '2026-09-29')
+
+    def test_cross_month_word_dedup_and_excel_report(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            results = p / 'results'
+            results.mkdir()
+            cfg = dict(j.config_defaults(), names=['陈云'], delay_seconds=0)
+            body_a = '9月30日，陈云在九江主持召开重点项目建设推进会议。' * 6
+            body_b = '10月3日，陈云主持召开新的专题工作会议。' * 6
+            body_c = '近期，陈云对重点事项进行了研究部署。' * 7
+            body_d = '9月30日，陈云在城区调研基层治理情况。' * 6
+            data = [
+                ('2026-09-30', '陈云研究项目甲', body_a),
+                ('2026-10-02', '陈云推进项目乙', body_a),  # same body, dedup
+                ('2026-10-03', '陈云主持其他会议', body_b),
+                ('2026-10-04', '陈云部署工作', body_c),  # no event date
+                ('2026-10-10', '陈云调研城区', body_d),
+            ]
+            with j.connect_db(results / 'cache.sqlite3') as con:
+                book = j.open_book(results / 'jiujiang_news.xlsx')
+                ws = book.active
+                for index, (published, title, body) in enumerate(data, 2):
+                    ident = 90000 + index
+                    yy, mm, dd = published.split('-')
+                    url = f'https://www.jjxw.cn/article/{yy}/{mm}/{dd}/{ident}.html'
+                    ws.cell(index, 1, title)
+                    ws.cell(index, 1).hyperlink = url
+                    ws.cell(index, 2, published)
+                    ws.cell(index, 7, url)
+                    con.execute(
+                        "INSERT INTO news(url,source,title,pub_date,article_title,body_json,status) "
+                        "VALUES(?,?,?,?,?,?,?)",
+                        (url, 'jjxw', title, published, title,
+                         json.dumps([body], ensure_ascii=False), '成功'))
+                chosen = j.refresh_book(book, con, ['陈云'], cfg)
+                self.assertEqual(len(chosen), 5)
+                self.assertEqual(ws.cell(3, 9).value, '2026-09-30')
+                self.assertEqual(ws.cell(4, 9).value, '2026-10-03')
+                self.assertFalse(ws.cell(5, 9).value)
+                self.assertEqual(ws.cell(6, 9).value, '2026-09-30')
+                book.save(results / 'jiujiang_news.xlsx')
+                selected, failures = j.deduplicate_for_month(chosen, '2026-09')
+                self.assertEqual(len(selected), 2)
+                self.assertFalse(failures)
+                self.assertTrue(j.build_word('2026-09', selected, results).exists())
+            self.assertEqual(j.verify_month_output(
+                '2026-09', results / 'jiujiang_news.xlsx', results, 10), 0)
+            report = json.loads((results / '抓取检查报告.json').read_text('utf-8'))
+            self.assertEqual(report['news'], 5)
+            self.assertEqual(report['late_candidates'], 4)
+            self.assertEqual(report['late_confirmed'], 2)
+            self.assertEqual(report['word_articles'], 2)
+
     def test_news_json_api(self):
         obj = {'data': {'list': [
             {'fileID': 190001, 'publishTime': '2026-09-18 10:00:00',

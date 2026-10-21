@@ -35,7 +35,7 @@ from urllib3.util.retry import Retry
 LOG = logging.getLogger('jrjj')
 SOURCES = {'jjxw': {'sheet': '九江新闻网', 'base': 'https://www.jjxw.cn/column/668/'}}
 DEFAULT_NAMES = ['陈云', '邓永翔', '黄强', '陈永奇', '庄兆林', '黄喜忠']
-HEADERS = ['新闻标题', '发布日期', '自动匹配', '命中姓名', '人工选择', '正文状态', '原文链接', '说明']
+HEADERS = ['新闻标题', '发布日期', '自动匹配', '命中姓名', '人工选择', '正文状态', '原文链接', '说明', '事件日期']
 RE_DATE = re.compile(r'(20\d{2})[-年/.](1[0-2]|0?[1-9])[-月/.](3[01]|[12]\d|0?[1-9])(?:日)?(?!\d)')
 RE_ISO = re.compile(r'20\d{2}-\d{2}-\d{2}')
 INVALID_URL = re.compile(r'^(?:#|javascript:|mailto:|tel:)', re.I)
@@ -101,6 +101,7 @@ def config_defaults() -> dict:
         'include_body_matches': True,
         'max_pages': 170,
         'stop_after_known_pages': 3,
+        'late_publication_days': 10,
         'delay_seconds': 0.4,
         'timeout_seconds': 20,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36',
@@ -114,6 +115,9 @@ def load_config(path: Path) -> dict:
     data = json.loads(path.read_text(encoding='utf-8'))
     cfg = {**config_defaults(), **data}
     cfg['names'] = sorted({norm_space(x) for x in cfg['names'] if norm_space(x) and len(norm_space(x)) >= 2})
+    grace = cfg['late_publication_days']
+    if type(grace) is not int or not 0 <= grace <= 31:
+        raise ValueError('late_publication_days 必须为 0～31 的整数')
     return cfg
 
 
@@ -404,10 +408,10 @@ def open_book(path: Path):
         cell.font = Font(name='微软雅黑', size=11, bold=True, color='FFFFFF')
         cell.alignment = Alignment(horizontal='center', vertical='center')
     for col, width in {'A': 73, 'B': 16, 'C': 14, 'D': 25,
-                       'E': 14, 'F': 16, 'G': 68, 'H': 35}.items():
+                       'E': 14, 'F': 16, 'G': 68, 'H': 35, 'I': 18}.items():
         ws.column_dimensions[col].width = width
     ws.freeze_panes = 'C2'
-    ws.auto_filter.ref = f'A1:H{max(ws.max_row, 2)}'
+    ws.auto_filter.ref = f'A1:I{max(ws.max_row, 2)}'
     ws.row_dimensions[1].height = 27
     if not ws.data_validations.dataValidation:
         validation = DataValidation(type='list', formula1='"收录,排除"', allow_blank=True)
@@ -464,8 +468,67 @@ def write_new_rows(book, records: dict[str, list[News]]):
             b.alignment = Alignment(horizontal='center', vertical='center')
             ws.cell(ix, 7, item.url)
             ws.row_dimensions[ix].height = 28
-        ws.auto_filter.ref = f'A1:H{ws.max_row}'
+        ws.auto_filter.ref = f'A1:I{ws.max_row}'
         LOG.info('%s：新增 %d 条', SOURCES[source]['sheet'], len(new_items))
+
+
+def publication_window(month: str, grace_days: int = 10) -> tuple[str, str]:
+    """Inclusive listing window, e.g. 2026-09-01 through 2026-10-10."""
+    y, m = map(int, month.split('-'))
+    first = date(y, m, 1)
+    next_month = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+    last = next_month + timedelta(days=grace_days - 1)
+    return first.isoformat(), last.isoformat()
+
+
+EVENT_ACTION = re.compile(
+    r'召开|举行|主持|出席|会见|调研|视察|走访|督导|考察|部署|'
+    r'参加|启动|开幕|闭幕|签约|举行座谈|听取汇报|检查|慰问|'
+    r'宣讲|在.{0,12}讲话|开展'
+)
+EVENT_DATE = re.compile(
+    r'(?:(?P<year>20\d{2})年)?(?P<month>1[0-2]|0?[1-9])月'
+    r'(?P<day>3[01]|[12]\d|0?[1-9])日|'
+    r'(?P<relative>昨日|昨天)'
+)
+
+
+def infer_event_date(title: str, paragraphs: list[str], publication: str,
+                     max_lag: int = 10) -> str:
+    """Infer only a strong, near-publication event-date statement.
+
+    Avoid treating a historical reference, future schedule, or a bare month
+    mention as the actual event date. Uncertain articles remain reviewable.
+    """
+    published = date.fromisoformat(publication)
+    # Event leads are usually in the title or first two paragraphs.
+    for text in [title, *paragraphs[:2]]:
+        lead = norm_space(text)[:280]
+        for match in EVENT_DATE.finditer(lead):
+            if re.search(r'将于|计划于|预计于|拟于', lead[max(0, match.start() - 4):match.start()]):
+                continue
+            context = lead[match.end():match.end() + 70].split('。', 1)[0]
+            action = EVENT_ACTION.search(context)
+            if not action:
+                continue
+            # "将举行" and "拟召开" are future plans, not events that happened.
+            if re.search(r'预计|计划|拟于|将于|即将|将|拟', context[:action.end()]):
+                continue
+            if match.group('relative'):
+                happened = published - timedelta(days=1)
+            else:
+                year = int(match.group('year') or published.year)
+                mm, dd = int(match.group('month')), int(match.group('day'))
+                if not match.group('year') and published.month == 1 and mm == 12:
+                    year -= 1
+                try:
+                    happened = date(year, mm, dd)
+                except ValueError:
+                    continue
+            lag = (published - happened).days
+            if 0 <= lag <= max_lag:
+                return happened.isoformat()
+    return ''
 
 
 def crawl(session: requests.Session, con: sqlite3.Connection,
@@ -474,15 +537,14 @@ def crawl(session: requests.Session, con: sqlite3.Connection,
     source = 'jjxw'
     new = {source: []}
     known_pages = 0
+    window_start, window_end = publication_window(target_month, cfg['late_publication_days'])
     for page in range(cfg['max_pages']):
         news, ok = fetch_list(session, page, cfg, debug)
         if not ok or not news:
             break
-        target_prefix = target_month if target_month else f'{year}-'
-        current = [n for n in news if n.pub_date.startswith(target_prefix)]
+        current = [n for n in news if window_start <= n.pub_date <= window_end]
         old = bool(current) and all(n.url in known[source] for n in current)
-        cutoff = f'{target_month}-01' if target_month else f'{year}-01-01'
-        older = all(n.pub_date < cutoff for n in news)
+        older = all(n.pub_date < window_start for n in news)
         count = 0
         for n in current:
             if n.url not in known[source]:
@@ -515,14 +577,15 @@ def fetch_article_details(session: requests.Session, con: sqlite3.Connection,
         url = get_cell_url(row[0], row[6].value)
         if selection(row) == 'include' and url:
             manual_urls.add(normalize_url(SOURCES[source]['base'], url))
-    # Old databases may contain government rows; never fetch those.
+    # Query by full date range so December news published in January is included.
+    start, end = publication_window(month, cfg['late_publication_days'])
     rows = con.execute(
-        "SELECT * FROM news WHERE source=? AND pub_date LIKE ? ORDER BY pub_date DESC",
-        (source, f'{year}-%')).fetchall()
+        "SELECT * FROM news WHERE source=? AND pub_date>=? AND pub_date<=? "
+        "ORDER BY pub_date DESC", (source, start, end)).fetchall()
     to_fetch = [
         n for n in rows if not (n['status'] == '成功' and n['body_json'])
         and ((scope == 'all' and n['url'] in fresh_urls)
-             or n['pub_date'].startswith(month)
+             or start <= n['pub_date'] <= end
              or n['url'] in manual_urls)
     ]
     LOG.info('需要抓取正文%d篇；成功缓存直接复用', len(to_fetch))
@@ -557,7 +620,7 @@ def refresh_book(book, con: sqlite3.Connection, names: list[str], cfg: dict) -> 
     for source in SOURCES:
         ws = book[SOURCES[source]['sheet']]
         for i in range(2, ws.max_row + 1):
-            row = [ws.cell(i, k) for k in range(1, 9)]
+            row = [ws.cell(i, k) for k in range(1, 10)]
             url = get_cell_url(row[0], row[6].value)
             if not url:
                 continue
@@ -568,17 +631,38 @@ def refresh_book(book, con: sqlite3.Connection, names: list[str], cfg: dict) -> 
             paras = json.loads(n['body_json'] or '[]')
             matches = match_names(n['article_title'] or n['title'], '\n'.join(paras), names, cfg['include_body_matches'])
             choose = selection(row)
+            # Column I is editable. A valid manual date always wins; otherwise
+            # infer only when the report contains a clear lead-date action.
+            raw_event = row[8].value
+            event_day = (raw_event.strftime('%Y-%m-%d')
+                         if isinstance(raw_event, (date, datetime))
+                         else date_from_text(str(raw_event or '')))
+            if not event_day and n['status'] == '成功':
+                event_day = infer_event_date(
+                    n['article_title'] or n['title'], paras, n['pub_date'],
+                    cfg['late_publication_days'])
+                if event_day:
+                    row[8].value = event_day
+            effective_day = event_day or n['pub_date']
             selected = choose == 'include' or (choose == 'auto' and bool(matches))
             row[2].value = '命中' if matches else ('待正文' if n['status'] != '成功' else '未命中')
             row[3].value = '、'.join(matches)
             row[5].value = n['status']
             row[6].value = url
-            row[7].value = n['message'] if n['status'] != '成功' else ('人工收录' if choose == 'include' else '人工排除' if choose == 'exclude' else '')
+            if n['status'] != '成功':
+                row[7].value = n['message']
+            elif event_day:
+                row[7].value = '事件日期已填写（I列可复核）'
+            else:
+                row[7].value = '事件日期未确认；跨月新闻请核对后在I列填写'
+            if choose == 'exclude':
+                row[7].value = '人工排除；' + row[7].value
             row[2].alignment = Alignment(horizontal='center')
             row[4].alignment = Alignment(horizontal='center')
             row[5].alignment = Alignment(horizontal='center')
             if selected:
-                chosen.append({'source': source, 'url': url, 'date': n['pub_date'],
+                chosen.append({'source': source, 'url': url, 'date': effective_day,
+                               'published': n['pub_date'],
                                'title': n['article_title'] or n['title'], 'body': paras,
                                'status': n['status'], 'matches': matches})
     return chosen
@@ -762,11 +846,13 @@ def previous_month(today: date | None = None) -> str:
     return (today.replace(day=1) - timedelta(days=1)).strftime('%Y-%m')
 
 
-def verify_month_output(month: str, excel: Path, output_dir: Path) -> int:
+def verify_month_output(month: str, excel: Path, output_dir: Path, grace_days: int = 10) -> int:
     """Verify monthly output without network or database writes."""
+    start, end = publication_window(month, grace_days)
     report = {
         'month': month, 'source': '九江新闻网', 'news': 0,
-        'matched': 0, 'word_articles': 0, 'errors': [],
+        'matched': 0, 'late_candidates': 0, 'late_confirmed': 0,
+        'word_articles': 0, 'errors': [],
     }
     if not excel.exists():
         report['errors'].append('缺少Excel文件')
@@ -777,13 +863,18 @@ def verify_month_output(month: str, excel: Path, output_dir: Path) -> int:
                 if book.sheetnames != ['九江新闻网']:
                     report['errors'].append('Excel必须只有九江新闻网工作表')
                 else:
-                    for row in book.active.iter_rows(min_row=2, max_col=8,
+                    for row in book.active.iter_rows(min_row=2, max_col=9,
                                                      values_only=True):
                         if not row[0]:
                             continue
+                        pub = str(row[1] or '')
+                        if not start <= pub <= end:
+                            continue  # Existing workbook can also contain other months.
                         report['news'] += 1
-                        if not str(row[1] or '').startswith(month):
-                            report['errors'].append('包含非目标月份的记录')
+                        if not pub.startswith(month):
+                            report['late_candidates'] += 1
+                            if str(row[8] or '').startswith(month):
+                                report['late_confirmed'] += 1
                         if row[2] == '命中':
                             report['matched'] += 1
             finally:
@@ -856,14 +947,16 @@ def main(argv=None, *, base_dir: Path | None = None) -> int:
     debug_dir = results / 'debug_html'
 
     if args.verify:
-        return verify_month_output(month, excel, results)
+        return verify_month_output(month, excel, results, load_config(root / 'config.json')['late_publication_days'])
 
     mode = 'sync' if args.sync else 'export' if args.export else 'all'
     cfg = load_config(root / 'config.json')
     year = int(month[:4])
     results.mkdir(parents=True, exist_ok=True)
 
-    LOG.info('目标月份：%s；模式：%s；输出目录：%s', month, mode, results)
+    LOG.info('目标月份：%s；延后%d天检索；发布日期范围：%s 至 %s；模式：%s；输出目录：%s',
+             month, cfg['late_publication_days'],
+             *publication_window(month, cfg['late_publication_days']), mode, results)
     backup_spreadsheet(excel)
     book = open_book(excel)
     with connect_db(database) as con:
