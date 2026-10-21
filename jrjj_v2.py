@@ -568,7 +568,8 @@ def write_new_rows(book, records: dict[str, list[News]]):
 
 
 def crawl(session: requests.Session, con: sqlite3.Connection, known: dict[str, set[str]],
-          cfg: dict, year: int, debug: Path, browser: bool) -> dict[str, list[News]]:
+          cfg: dict, year: int, debug: Path, browser: bool,
+          target_month: str | None = None) -> dict[str, list[News]]:
     new = {source: [] for source in SOURCES}
     for source in SOURCES:
         known_pages = 0
@@ -578,9 +579,10 @@ def crawl(session: requests.Session, con: sqlite3.Connection, known: dict[str, s
             next_url = discovered_next
             if not ok:
                 break
-            in_year = [x for x in news if x.pub_date.startswith(f'{year}-')]
+            in_year = [x for x in news if x.pub_date.startswith(target_month if target_month else f'{year}-')]
             old = len(in_year) and all(x.url in known[source] for x in in_year)
-            older = len(news) and all(x.pub_date < f'{year}-01-01' for x in news)
+            cutoff = f'{target_month}-01' if target_month else f'{year}-01-01'
+            older = bool(news) and all(x.pub_date < cutoff for x in news)
             count = 0
             for n in in_year:
                 if n.url not in known[source]:
@@ -835,6 +837,7 @@ def args_parser():
     parser.add_argument('--debug-dir', default='debug_html', help='页面识别失败时保存HTML的目录')
     parser.add_argument('--max-pages', type=int, help='覆盖配置中的最多分页数')
     parser.add_argument('--full-scan', action='store_true', help='即使连续遇到旧记录，也扫完当年全部分页')
+    parser.add_argument('--only-month', action='store_true', help='仅采集所选月份的新闻列表，遇到更早日期即停止；不会把其他月份写入Excel')
     return parser
 
 
@@ -858,7 +861,8 @@ def main(argv=None) -> int:
         session = build_session(cfg['user_agent'])
         new = {source: [] for source in SOURCES}
         if args.mode != 'export':
-            new = crawl(session, con, existing, cfg, year, Path(args.debug_dir), args.browser)
+            new = crawl(session, con, existing, cfg, year, Path(args.debug_dir), args.browser,
+                        month if args.only_month else None)
             write_new_rows(book, new)
             # Save the new listing first; failed article requests must not lose the work.
             book.save(args.excel)
