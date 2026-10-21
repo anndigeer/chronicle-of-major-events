@@ -1,0 +1,101 @@
+name: News collection
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Choose a limited government test or full monthly export'
+        type: choice
+        options:
+          - government_smoke
+          - month_export
+        default: government_smoke
+        required: true
+      month:
+        description: 'Month to inspect (YYYY-MM)'
+        type: string
+        default: '2026-09'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: news-collection
+  cancel-in-progress: false
+
+jobs:
+  government-smoke:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'government_smoke'
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+      JIUJIANG_API_KEY: ${{ secrets.JIUJIANG_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: python -m pip install -r requirements_v2.txt
+      - name: Download government XML and inspect matched article bodies
+        shell: bash
+        run: |
+          mkdir -p results
+          set -o pipefail
+          python -u scripts/government_xml_smoke.py --month "${{ inputs.month || '2026-09' }}" --max-articles 25 --max-matched 3 --output-dir results 2>&1 | tee results/government_smoke.log
+      - name: Upload network diagnosis, XML, and extracted article metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: government-xml-smoke
+          path: results/
+          if-no-files-found: warn
+          retention-days: 14
+
+  month-export:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'month_export'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+      JIUJIANG_API_KEY: ${{ secrets.JIUJIANG_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: python -m pip install -r requirements_v2.txt
+      - name: Collect selected month
+        id: collect
+        shell: bash
+        continue-on-error: true
+        run: |
+          mkdir -p results
+          set -o pipefail
+          python -u jrjj_v2.py --month "${{ inputs.month || '2026-09' }}" --only-month --mode all --content-scope month --max-pages 12 --excel results/jiujiang_news.xlsx --database results/jiujiang_cache.sqlite3 --output-dir results --debug-dir results/debug_html 2>&1 | tee results/collection.log
+      - name: Verify exported month
+        id: verify
+        if: always()
+        continue-on-error: true
+        run: python scripts/verify_month_output.py --month "${{ inputs.month || '2026-09' }}" --folder results
+      - name: Upload all generated files and diagnosis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: news-month-export
+          path: results/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Fail if collection or validation failed
+        if: always()
+        env:
+          CRAWL: ${{ steps.collect.outcome }}
+          VERIFY: ${{ steps.verify.outcome }}
+        run: |
+          test "$CRAWL" = success
+          test "$VERIFY" = success

@@ -116,3 +116,12 @@ py -3 jrjj_v2.py --browser
 3. 默认只抓取**目标月份所在年份**；例如 2027 年 1 月默认制作 2026 年 12 月，并抓取 2026 年新闻。
 4. 不要在程序运行途中直接编辑 Excel；需要手动筛选时先等待程序结束。
 5. 本发布包已通过离线列表解析、旧工作表迁移、中文关键词、跨站去重及 Word 生成测试。**由于当前执行环境无法直接连通九江市政府官网，尚不能宣称两站生产环境已全部实测通过。**
+
+## 九、GitHub Actions（手动联网检查）
+
+仓库只保留一套 [News collection](.github/workflows/news-collection.yml) 采集工作流：
+
+- `government_smoke`：只检查指定月份的九江市政府年度 XML，并抽样请求正文、匹配 `jrjj_config.json` 中的姓名。不会导出月度 Word；下载 `government-xml-smoke` 诊断文件查看状态。
+- `month_export`：按指定月份同时采集两站，生成 Excel、Word，并用 `scripts/verify_month_output.py` 统一核验。若政府网站不可达，仍上传已生成文件和诊断日志，但不会报告“完整成功”。
+
+正常的 `Python CI` 仅执行离线测试。政府接口若使用官方授权的 API Key，可配置仓库 Secret `JIUJIANG_API_KEY`；不要将密钥或 Cookie 写入源码或提交。

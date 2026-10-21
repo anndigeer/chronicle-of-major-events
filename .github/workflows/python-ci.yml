@@ -5,12 +5,6 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-    inputs:
-      live_smoke:
-        description: 'Check real news sites (may fail if sites block CI)'
-        type: boolean
-        default: false
-        required: false
 
 permissions:
   contents: read
@@ -63,46 +57,3 @@ jobs:
         env:
           PYTHONIOENCODING: cp1252
 
-  live-smoke:
-    name: Optional live website verification
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.live_smoke }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Configure Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: pip
-          cache-dependency-path: requirements_v2.txt
-      - name: Install dependencies
-        run: python -m pip install -r requirements_v2.txt
-      - name: Verify public news sources and article extraction
-        run: python scripts/live_smoke.py
-
-  government-xml-test:
-    name: One-time government XML and leader-article smoke test
-    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[gov-xml-test]') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: python -m pip install -r requirements_v2.txt
-      - name: Fetch government XML and matching article bodies
-        env:
-          PYTHONUNBUFFERED: '1'
-          PYTHONIOENCODING: utf-8
-        run: python scripts/test_government_xml.py
-      - name: Upload diagnostics regardless of result
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: government-xml-diagnostics
-          path: diagnostics/
-          if-no-files-found: warn
-          retention-days: 14

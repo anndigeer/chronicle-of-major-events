@@ -11,7 +11,8 @@ REQUIRED = (
     'jrjj_config.json',
     'requirements_v2.txt',
     'test_jrjj_v2.py',
-    'scripts/live_smoke.py',
+    'scripts/government_xml_smoke.py',
+    '.github/workflows/news-collection.yml',
     'scripts/test_government_xml.py',
     '.github/workflows/python-ci.yml',
 )

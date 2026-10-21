@@ -7,6 +7,7 @@ import argparse
 import json
 from contextlib import contextmanager
 import logging
+import os
 import re
 import socket
 import shutil
@@ -256,8 +257,12 @@ def fetch_government_xml(session: requests.Session, url: str, timeout: int) -> b
         'User-Agent': session.headers.get('User-Agent', 'Python requests'),
         'Accept': 'application/xml, text/xml;q=0.9, */*;q=0.8',
         'Accept-Language': session.headers.get('Accept-Language', 'zh-CN,zh;q=0.9'),
-        'Referer': 'https://www.jiujiang.gov.cn/zwzx/jrjj/',
+        'Referer': f'https://www.jiujiang.gov.cn/zwzx/jrjj/?year={url.rsplit("data_", 1)[-1].split(".", 1)[0]}&page=1',
     }
+    # Optional official-access credential; never store it in the repository.
+    api_key = os.environ.get('JIUJIANG_API_KEY', '').strip()
+    if api_key:
+        headers['x-api-key'] = api_key
     connect_timeout = min(max(float(timeout), 1.0), 6.0)
     read_timeout = max(float(timeout), 2.0)
 
