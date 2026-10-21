@@ -43,13 +43,6 @@ DEFAULT_NAMES = ['陈云', '邓永翔', '黄强', '陈永奇', '庄兆林', '黄
 HEADERS = ['新闻标题', '发布日期', '自动匹配', '命中姓名', '人工选择', '正文状态', '原文链接', '说明']
 RE_DATE = re.compile(r'(20\d{2})[-年/.](1[0-2]|0?[1-9])[-月/.](3[01]|[12]\d|0?[1-9])(?:日)?(?!\d)')
 RE_ISO = re.compile(r'20\d{2}-\d{2}-\d{2}')
-RE_NAME = re.compile(r'^[\u4e00-\u9fff]{2,4}$')
-# Categories from the leaders portal are not personal names.
-NON_PERSON_LABELS = frozenset({
-    '人大', '省委', '省政府', '市委', '市政府', '政协', '法院', '检察院',
-    '政府', '党委', '党校', '公安', '公安局', '领导', '更多', '报道合集',
-    '省委书记', '省委常委', '人大常委', '领导分工', '更多内容', '查看更多',
-})
 INVALID_URL = re.compile(r'^(?:#|javascript:|mailto:|tel:)', re.I)
 CONTENT_SELECTORS = [
     '#artibody > div.trs_editor_view', '#artibody', '#zoom',
@@ -203,7 +196,6 @@ def next_page_urls(source: str, n: int) -> list[str]:
 def config_defaults() -> dict:
     return {
         'names': DEFAULT_NAMES,
-        'fetch_ifeng_names': False,
         'include_body_matches': True,
         'max_pages': 170,
         'stop_after_known_pages': 3,
@@ -218,6 +210,8 @@ def load_config(path: Path) -> dict:
         path.write_text(json.dumps(config_defaults(), ensure_ascii=False, indent=2), encoding='utf-8')
         LOG.info('已创建配置文件：%s', path)
     data = json.loads(path.read_text(encoding='utf-8'))
+    # Ignore the obsolete option in existing configuration files.
+    data.pop('fetch_ifeng_names', None)
     cfg = {**config_defaults(), **data}
     cfg['names'] = sorted({norm_space(x) for x in cfg['names'] if norm_space(x) and len(norm_space(x)) >= 2})
     return cfg
@@ -386,37 +380,9 @@ def fetch_list(session: requests.Session, source: str, page: int, cfg: dict,
             session.headers['Referer'] = original_referer
 
 
-def extract_ifeng_names(html: str) -> list[str]:
-    soup = BeautifulSoup(html, 'html.parser')
-    blocks = soup.select('div.part-c-l.pull-left[data-name="jx_ld_zykl"]')
-    if not blocks:
-        blocks = soup.select('div[data-id="193040"][data-name="jx_ld_zykl"]')
-    names = set()
-    for block in blocks:
-        for tag in block.select('h2, h3, h4, h5, h6, a, dt, strong'):
-            candidate = norm_space(tag.get_text(' ', strip=True))
-            if RE_NAME.fullmatch(candidate) and candidate not in NON_PERSON_LABELS:
-                names.add(candidate)
-    return sorted(names)
-
-
-def get_names(session: requests.Session, cfg: dict) -> list[str]:
-    """Only names explicitly approved in jrjj_config.json trigger inclusion.
-
-    The external leaders website also contains category labels, such as 人大
-    and 省委. Candidate names may be logged, but are never added silently.
-    """
-    result = set(cfg['names'])
-    if cfg.get('fetch_ifeng_names', False):
-        try:
-            discovered = extract_ifeng_names(fetch_html(session, 'https://jx.ifeng.com/leaders/', cfg['timeout_seconds']))
-            suggestions = sorted(set(discovered) - result)
-            if suggestions:
-                LOG.info('外部政要库有 %d 个待确认姓名（未加入匹配）：%s',
-                         len(suggestions), '、'.join(suggestions))
-        except Exception as exc:
-            LOG.warning('外部政要库访问失败（不影响配置的姓名匹配）：%s', exc)
-    return sorted(result)
+def get_names(cfg: dict) -> list[str]:
+    """Use only personal names explicitly supplied in the configuration."""
+    return sorted(set(cfg['names']))
 
 
 def clean_body(soup: BeautifulSoup) -> tuple[str, list[str]]:
@@ -967,16 +933,11 @@ def main(argv=None) -> int:
             # Save the new listing first; failed article requests must not lose the work.
             book.save(args.excel)
             fetch_article_details(session, con, cfg, year, month, new, book, args.browser, args.content_scope)
-        if args.mode != 'export':
-            names = get_names(session, cfg)
-            con.execute('INSERT OR REPLACE INTO metadata(key,value) VALUES (?,?)',
-                        ('last_names', json.dumps(names, ensure_ascii=False)))
-            con.commit()
-        else:
-            # Manual review workflow: do not rescan listings; fetch missing month/yellow article bodies.
+        if args.mode == 'export':
+            # Manual review: skip listing refresh; only fetch needed article bodies.
             fetch_article_details(session, con, cfg, year, month, new, book, args.browser, 'month')
-            # Do not revive unapproved terms from previous metadata.
-            names = sorted(set(cfg['names']))
+        # Always recompute matches from the current configuration; ignore old metadata.
+        names = get_names(cfg)
         selected = refresh_book(book, con, names, cfg)
         book.save(args.excel)
         LOG.info('Excel已更新：%s；自动检测名单 %d 人', args.excel, len(names))

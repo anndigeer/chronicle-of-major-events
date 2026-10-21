@@ -169,9 +169,41 @@ class TestJrjj(unittest.TestCase):
         self.assertNotIn('陈永奇',''.join(paras))
         self.assertEqual(j.match_names(title,''.join(paras),['黄强','陈永奇'],True),['黄强'])
 
-    def test_ifeng_scope(self):
-        html='''<html><div class="part-c-l pull-left" data-name="jx_ld_zykl"><h4>陈永奇</h4><h5>庄兆林</h5></div><h4>误收人名</h4></html>'''
-        self.assertEqual(j.extract_ifeng_names(html),['庄兆林','陈永奇'])
+    def test_names_strictly_from_config_no_external_lookup(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'config.json'
+            config = {**j.config_defaults(), 'names': ['陈云', '黄强'],
+                      'fetch_ifeng_names': True}
+            path.write_text(json.dumps(config, ensure_ascii=False), encoding='utf-8')
+            loaded = j.load_config(path)
+            self.assertNotIn('fetch_ifeng_names', loaded)
+            self.assertEqual(j.get_names(loaded), ['陈云', '黄强'])
+            self.assertFalse(hasattr(j, 'extract_ifeng_names'))
+
+    def test_organization_words_cannot_trigger_inclusion(self):
+        cfg = {**j.config_defaults(), 'names': ['陈云', '黄强']}
+        names = j.get_names(cfg)
+        title = '市人大常委会党组理论学习中心组举行集体学习，廖奇志主持并讲话'
+        body = ('九江新闻网讯 9月2日，市人大常委会党组理论学习中心组举行集体学习。'
+                '人大、省委、省政府、政协、法院和检察院参与相关活动。')
+        self.assertEqual(j.match_names(title, body, names, True), [])
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)
+            book = j.open_book(path / 'news.xlsx')
+            record = j.News('jjxw', title, 'https://www.jjxw.cn/article/2026/09/02/999999.html', '2026-09-02')
+            j.write_new_rows(book, {'gov': [], 'jjxw': [record]})
+            with j.connect_db(path / 'cache.sqlite3') as con:
+                j.upsert_news(con, record)
+                con.execute("UPDATE news SET status='成功', body_json=?, article_title=? WHERE url=?",
+                            (json.dumps([body], ensure_ascii=False), title, record.url))
+                con.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES (?,?)",
+                            ('last_names', json.dumps(['人大', '省委', '省政府', '政协'], ensure_ascii=False)))
+                selected = j.refresh_book(book, con, j.get_names(cfg), cfg)
+                self.assertEqual(selected, [])
+                sheet = book['九江新闻网']
+                self.assertEqual(sheet['C2'].value, '未命中')
+                self.assertFalse(sheet['D2'].value)
+        self.assertEqual(j.match_names('陈云在九江调研', '', names, True), ['陈云'])
 
     def test_upgrade_preserve_yellow_and_word(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -203,7 +235,7 @@ class TestJrjj(unittest.TestCase):
     def test_fake_full_pipeline(self):
         with tempfile.TemporaryDirectory() as folder:
             p=Path(folder)
-            config={**j.config_defaults(),'fetch_ifeng_names':False,'delay_seconds':0,'max_pages':2,'stop_after_known_pages':2,'names':['陈云','黄强']}
+            config={**j.config_defaults(),'delay_seconds':0,'max_pages':2,'stop_after_known_pages':2,'names':['陈云','黄强']}
             (p/'cfg.json').write_text(json.dumps(config,ensure_ascii=False),encoding='utf-8')
             def fake_fetch(session,url,timeout):
                 if 'data_2026.xml' in url:return GOV_XML
