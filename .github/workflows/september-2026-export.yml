@@ -1,12 +1,6 @@
 name: September 2026 collection
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'source_feeds.py'
-      - 'jrjj_v2.py'
-      - '.github/workflows/september-2026-export.yml'
 permissions:
   contents: read
 jobs:
