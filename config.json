@@ -1,12 +1,4 @@
 {
-  "names": [
-    "陈云",
-    "邓永翔",
-    "黄强",
-    "陈永奇",
-    "庄兆林",
-    "黄喜忠"
-  ],
   "include_body_matches": true,
   "max_pages": 170,
   "delay_seconds": 0.4,

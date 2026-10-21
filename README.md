@@ -1,6 +1,6 @@
 # 九江新闻网 · 市委大事记整理工具
 
-只采集 **九江新闻网「九江时政」**。运行时从公开 JSON 接口获取新闻列表及正文，自动筛选 `config.json` 中的姓名，生成 Excel、Word，使用 SQLite 缓存并对 Word 正文去重。**不采集九江市政府网站**，也不会添加外部政要姓名。
+只采集 **九江新闻网「九江时政」**。运行时从公开 JSON 接口获取新闻列表及正文，根据本地 `names.txt` 姓名名单（或旧版 `config.json` 名单）筛选，生成 Excel、Word，使用 SQLite 缓存并对 Word 正文去重。**不采集九江市政府网站**，也不会自动添加外部政要姓名。
 
 ## Windows：在本地电脑运行和测试
 
@@ -15,10 +15,14 @@ cd .\chronicle-of-major-events
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
-# 1. 离线自检：不请求新闻网站
+# 第一次使用：复制一份个人名单并在记事本打开
+Copy-Item .\names.example.txt .\names.txt
+notepad .\names.txt
+
+# 保存名单后进行离线自检
 .\.venv\Scripts\python.exe main.py --test
 
-# 2. 实际采集2026年9月，并导出Excel、Word
+# 实际采集2026年9月，并导出Excel、Word
 .\.venv\Scripts\python.exe main.py 2026-09
 ~~~
 
@@ -92,9 +96,41 @@ Excel 新增 **I 列「事件日期」**，A—H 列的人工操作位置不变�
 
 > 表中的 `python` 可替换为 Windows 的 `.\.venv\Scripts\python.exe`。没有额外的年份、网站、数据库路径或工作表参数；翻页数、延迟、超时和姓名等在 `config.json` 中配置。
 
+## 批量录入 30 多个人名：只需粘贴，不用改 JSON
+
+**推荐使用 `names.txt`**，放在 `main.py` 同一个目录；它是你电脑上的私人名单，已加入 `.gitignore`，以后更新代码不会修改它。首次在 PowerShell 执行：
+
+~~~powershell
+Copy-Item .\names.example.txt .\names.txt
+notepad .\names.txt
+~~~
+
+在 Excel/WPS 中把所有姓名放在**一列**（不需要序号和职务），选中整列中的人名，按 `Ctrl+C`，回到记事本 `Ctrl+V` 粘贴并 `Ctrl+S` 保存。每行一个：
+
+~~~text
+张三
+李四
+欧阳修
+阿布都·拉西提
+~~~
+
+程序也接受一行输入：`张三、李四，欧阳修;阿布都·拉西提`，支持换行、制表符、中文/英文逗号、顿号、分号。空行、以 `#` 开头的注释、Excel 表头“姓名”会被跳过；**重复姓名自动去重**，保留粘贴顺序。带职务、序号、异常字符的内容会提示行号，不会静默加入名单。注意姓名中间的 `·` 不会被当作分隔符。
+
+**优先级：** 只要 `names.txt` 存在，就以其全部姓名为准，不与 `config.json` 里的 `names` 混合；如删掉 `names.txt`，仍兼容旧版 JSON 名单。文件存在但为空会明确报错，避免意外继续使用旧名单。请使用 UTF-8 文本，Windows 记事本的 UTF-8（包括 BOM）均支持。
+
+更换名单后无需重新下载已缓存的新闻，可以直接运行：
+
+~~~powershell
+.\.venv\Scripts\python.exe main.py 2026-09 --export
+~~~
+
+程序会按最新名单重新判断 Excel 的 C/D 列命中情况，并重新生成 Word；**E 列人工收录/排除、I 列事件日期不会因此被覆盖**。若首次尚未采集，则直接运行 `python main.py 2026-09`。
+
+银河麒麟/Linux 同样可以执行 `cp names.example.txt names.txt`，然后用文本编辑器填写，一行一人。
+
 ## 修改姓名、人工筛选与历史记录
 
-`config.json` 的 `names` 是**唯一**自动匹配姓名名单。根据 `include_body_matches` 决定是否在正文查找姓名，绝不会抓取外部政要名单。
+姓名优先从 `names.txt` 读取；若没有该文件则兼容 `config.json` 的旧名单。`include_body_matches` 决定是否在正文查找姓名，绝不会抓取外部政要名单。
 
 Excel 的 E 列可填“收录”或“排除”；旧的黄色单元格标记仍表示人工收录。人工修改后，先保存并关闭 Excel，再执行 `python main.py 2026-09 --export`。Word 以正文为依据判断重复：即使标题不同，正文实质相同也合并；标题相同但报道内容不同则分别保留。
 

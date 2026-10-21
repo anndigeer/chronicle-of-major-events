@@ -97,6 +97,40 @@ def date_from_text(raw: str) -> str:
         return ''
 
 
+NAME_TOKEN = re.compile(r'[^\W\d_]+(?:[·•-][^\W\d_]+)*', re.UNICODE)
+NAME_SEPARATORS = re.compile(r'[,，、;；\t]+')
+
+
+def parse_names_text(content: str) -> list[str]:
+    """Read pasted Excel columns or separated names, without guessing from prose.
+
+    Names are separated by newlines, tabs, Chinese/ASCII commas, semicolons
+    or ideographic enumeration marks. A middle dot is part of a person's
+    name, not a separator. Reject malformed entries instead of silently
+    changing the names used for matching.
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+    for line_no, line in enumerate(content.lstrip('\ufeff').splitlines(), 1):
+        if line.strip().startswith(('#', '＃')):
+            continue
+        for token in NAME_SEPARATORS.split(line):
+            name = norm_space(token)
+            if not name or name in {'姓名', '人名', '关键词'}:
+                continue
+            if not 2 <= len(name) <= 30 or not NAME_TOKEN.fullmatch(name):
+                raise ValueError(
+                    f'names.txt 第{line_no}行姓名格式不正确：{name!r}；'
+                    '请只复制人名列，用换行、逗号、顿号或分号分隔，不要包含职务、序号或空格')
+            if name not in seen:
+                seen.add(name)
+                found.append(name)
+    if not found:
+        raise ValueError(
+            'names.txt 没有有效姓名；请每行填写一个人名（可直接粘贴Excel的一列）')
+    return found
+
+
 def config_defaults() -> dict:
     return {
         'names': DEFAULT_NAMES,
@@ -118,7 +152,15 @@ def load_config(path: Path) -> dict:
     if (not isinstance(cfg['names'], list)
             or not all(isinstance(name, str) for name in cfg['names'])):
         raise ValueError('names 必须是字符串数组，例如 ["陈云", "黄强"]')
-    cfg['names'] = sorted({norm_space(x) for x in cfg['names'] if norm_space(x) and len(norm_space(x)) >= 2})
+    cfg['names'] = list(dict.fromkeys(
+        norm_space(x) for x in cfg['names'] if norm_space(x) and len(norm_space(x)) >= 2))
+    # names.txt is local and gitignored. It overrides config.json, allowing
+    # 30+ names to be pasted directly from Excel without editing JSON.
+    names_file = path.with_name('names.txt')
+    if names_file.is_file():
+        cfg['names'] = parse_names_text(names_file.read_text(encoding='utf-8-sig'))
+        LOG.info('已从 %s 批量读取 %d 个人名，优先于config.json中的names',
+                 names_file, len(cfg['names']))
     grace = cfg['late_publication_days']
     if type(grace) is not int or not 0 <= grace <= 31:
         raise ValueError('late_publication_days 必须为 0～31 的整数')
@@ -256,8 +298,8 @@ def fetch_list(session: requests.Session, page: int, cfg: dict,
 
 
 def get_names(cfg: dict) -> list[str]:
-    """Use only personal names explicitly supplied in the configuration."""
-    return sorted(set(cfg['names']))
+    """Use only the explicitly supplied names, in their pasted order."""
+    return list(dict.fromkeys(cfg['names']))
 
 
 def clean_body(soup: BeautifulSoup) -> tuple[str, list[str]]:

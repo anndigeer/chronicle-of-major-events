@@ -537,6 +537,90 @@ class TestJjxw(unittest.TestCase):
             self.assertEqual(reopened.active['I2'].comment.text,
                              'MANUAL_EVENT_DATE_REVIEW')
 
+    def test_batch_names_pasted_from_excel_column(self):
+        pasted = '\ufeff姓名\n陈云\n黄强\n陈云\n欧阳修\n# 第一组\n阿布都·拉西提\n'
+        names = j.parse_names_text(pasted)
+        self.assertEqual(names, ['陈云', '黄强', '欧阳修', '阿布都·拉西提'])
+        self.assertEqual(j.get_names({'names': names}), names)
+        self.assertEqual(j.match_names('黄强主持会议', '', names, False),
+                         ['黄强'])
+
+    def test_batch_names_mixed_separators_and_duplicate_dedup(self):
+        pasted = ('姓名\n陈云、邓永翔，黄强;庄兆林；陈永奇\t黄喜忠\n'
+                  '陈云,黄强\n＃复制自通讯录\n')
+        self.assertEqual(j.parse_names_text(pasted),
+                         ['陈云', '邓永翔', '黄强', '庄兆林',
+                          '陈永奇', '黄喜忠'])
+
+    def test_names_file_precedes_config_without_mutating_json(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            path = root / 'config.json'
+            stored = dict(j.config_defaults(), names=['旧名单'])
+            original = json.dumps(stored, ensure_ascii=False)
+            path.write_text(original, encoding='utf-8')
+            (root / 'names.txt').write_text(
+                '姓名\n新人物甲\n新人物乙\n新人物甲\n', encoding='utf-8-sig')
+            cfg = j.load_config(path)
+            self.assertEqual(j.get_names(cfg), ['新人物甲', '新人物乙'])
+            self.assertEqual(path.read_text('utf-8'), original)
+            self.assertEqual(j.match_names('新人物乙主持会议', '', j.get_names(cfg), False),
+                             ['新人物乙'])
+            (root / 'names.txt').unlink()
+            self.assertEqual(j.get_names(j.load_config(path)), ['旧名单'])
+
+    def test_empty_or_malformed_names_file_fails_without_network(self):
+        examples = ['\n# 暂无名单\n', '张三 李四', '张三,主持会议！',
+                    '张三,王1', '1.张三', '姓名\n']
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'config.json').write_text(
+                json.dumps(j.config_defaults(), ensure_ascii=False), 'utf-8')
+            for content in examples:
+                (root / 'names.txt').write_text(content, encoding='utf-8')
+                with self.subTest(content=content):
+                    with patch.object(j, 'fetch_list',
+                                      side_effect=AssertionError('should be offline')):
+                        with self.assertRaisesRegex(ValueError, 'names.txt'):
+                            j.main(['2026-09', '--sync'], base_dir=root)
+            self.assertFalse((root / 'results' / 'jiujiang_cache.sqlite3').exists())
+
+    def test_export_rechecks_cached_articles_with_updated_batch_names(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            cfg = dict(j.config_defaults(), delay_seconds=0,
+                       names=['没有出现在正文中的人'])
+            (root / 'config.json').write_text(
+                json.dumps(cfg, ensure_ascii=False), encoding='utf-8')
+            news = '黄强'
+            url = 'https://www.jjxw.cn/article/2026/09/18/909999.html'
+            output = root / 'results'
+            output.mkdir()
+            with j.connect_db(output / 'jiujiang_cache.sqlite3') as con:
+                content = ['9月17日，黄强在九江主持召开工作会议。' * 8]
+                con.execute(
+                    "INSERT INTO news(url,source,title,pub_date,article_title,"
+                    "body_json,status) VALUES(?,?,?,?,?,?,?)",
+                    (url, 'jjxw', f'{news}主持工作会议', '2026-09-18',
+                     f'{news}主持工作会议',
+                     json.dumps(content, ensure_ascii=False), '成功'))
+            book = j.open_book(output / 'jiujiang_news.xlsx')
+            ws = book.active
+            ws.cell(2, 1, f'{news}主持工作会议').hyperlink = url
+            ws.cell(2, 2, '2026-09-18')
+            ws.cell(2, 7, url)
+            j.save_book_atomic(book, output / 'jiujiang_news.xlsx')
+            (root / 'names.txt').write_text('黄强\n邓永翔\n', 'utf-8')
+            with patch.object(j, 'fetch_html',
+                              side_effect=AssertionError('cache should be used')) as fetch:
+                code = j.main(['2026-09', '--export'], base_dir=root)
+            self.assertEqual(code, 0)
+            fetch.assert_not_called()
+            wb = load_workbook(output / 'jiujiang_news.xlsx')
+            self.assertEqual(wb.active['C2'].value, '命中')
+            self.assertEqual(wb.active['D2'].value, '黄强')
+            self.assertTrue((output / '市委大事记（2026年9月）.docx').exists())
+
     def test_news_json_api(self):
         obj = {'data': {'list': [
             {'fileID': 190001, 'publishTime': '2026-09-18 10:00:00',
