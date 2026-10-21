@@ -55,11 +55,13 @@ jobs:
       - name: Check script syntax
         run: python -m compileall -q jrjj_v2.py test_jrjj_v2.py scripts/
 
-      - name: Run seven offline regression tests
+      - name: Run eight offline regression tests
         run: python -m unittest -v test_jrjj_v2
 
-      - name: Check command-line interface
+      - name: Check command-line interface with legacy Windows codepage
         run: python jrjj_v2.py --help
+        env:
+          PYTHONIOENCODING: cp1252
 
   live-smoke:
     name: Optional live website verification
