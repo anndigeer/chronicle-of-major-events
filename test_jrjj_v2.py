@@ -26,6 +26,47 @@ JJXW_JSON=json.dumps({"data":{"list":[{"fileID":803640,"publishTime":"2026-10-19
                                       {"fileID":"803641","publishTime":"2026-10-18 09:00:00","title":"市委召开专项会议"}]}},ensure_ascii=False)
 
 class TestJrjj(unittest.TestCase):
+    def test_gov_xml_direct_requests_get_prefers_ipv4_and_preserves_bytes(self):
+        response = j.requests.Response()
+        response.status_code = 200
+        response._content = GOV_XML.encode('utf-8')
+        original_family = j.urllib3_connection.allowed_gai_family
+        with patch.object(j.requests, 'get', return_value=response) as request_get:
+            xml = j.fetch_government_xml(
+                j.build_session('test-agent'),
+                'https://www.jiujiang.gov.cn/zwzx/jrjj/data_2026.xml', 10)
+        self.assertEqual(j.urllib3_connection.allowed_gai_family, original_family)
+        self.assertEqual(len(j.parse_gov_xml(xml)), 2)
+        self.assertEqual(request_get.call_count, 1)
+        self.assertEqual(request_get.call_args.kwargs['timeout'], (6.0, 10.0))
+        self.assertIn('application/xml', request_get.call_args.kwargs['headers']['Accept'])
+
+    def test_gov_xml_ipv4_failure_retries_default_stack_once(self):
+        response = j.requests.Response()
+        response.status_code = 200
+        response._content = GOV_XML.encode('utf-8')
+        original_family = j.urllib3_connection.allowed_gai_family
+        with patch.object(j.requests, 'get', side_effect=[
+            j.requests.exceptions.ConnectionError('[Errno 101] Network is unreachable'),
+            response,
+        ]) as request_get:
+            xml = j.fetch_government_xml(
+                j.build_session('test-agent'),
+                'https://www.jiujiang.gov.cn/zwzx/jrjj/data_2026.xml', 8)
+        self.assertEqual(j.urllib3_connection.allowed_gai_family, original_family)
+        self.assertEqual(request_get.call_count, 2)
+        self.assertEqual(len(j.parse_gov_xml(xml)), 2)
+
+    def test_gov_xml_http_error_is_not_retried(self):
+        response = j.requests.Response()
+        response.status_code = 403
+        response.url = 'https://www.jiujiang.gov.cn/zwzx/jrjj/data_2026.xml'
+        response._content = b'Forbidden'
+        with patch.object(j.requests, 'get', return_value=response) as request_get:
+            with self.assertRaises(j.requests.exceptions.HTTPError):
+                j.fetch_government_xml(j.build_session('test-agent'), response.url, 8)
+        self.assertEqual(request_get.call_count, 1)
+
     def test_government_annual_xml_feed(self):
         records=j.parse_gov_xml(GOV_XML)
         self.assertEqual(len(records),2)
@@ -43,15 +84,15 @@ class TestJrjj(unittest.TestCase):
     def test_structured_fetch_routing_no_html_listing(self):
         with tempfile.TemporaryDirectory() as folder:
             session=j.build_session('test-agent')
-            with patch.object(j,'fetch_html',side_effect=[GOV_XML, JJXW_JSON, '{"data":{"list":[]}}']) as fetch:
+            with patch.object(j,'fetch_government_xml',return_value=GOV_XML.encode('utf-8')) as gov_get, patch.object(j,'fetch_html',side_effect=[JJXW_JSON, '{"data":{"list":[]}}']) as fetch:
                 gov, ok, _=j.fetch_list(session,'gov',0,j.config_defaults(),False,Path(folder),year=2026)
                 self.assertTrue(ok)
                 self.assertEqual(len(gov),2)
-                self.assertIn('data_2026.xml',fetch.call_args_list[0].args[1])
+                self.assertIn('data_2026.xml',gov_get.call_args.args[1])
                 jx, ok, _=j.fetch_list(session,'jjxw',0,j.config_defaults(),False,Path(folder),year=2026)
                 self.assertTrue(ok)
                 self.assertEqual(len(jx),2)
-                self.assertIn('pageSize=100&pageNumber=1',fetch.call_args_list[1].args[1])
+                self.assertIn('pageSize=100&pageNumber=1',fetch.call_args_list[0].args[1])
                 empty, ok, _=j.fetch_list(session,'jjxw',1,j.config_defaults(),False,Path(folder),year=2026)
                 self.assertTrue(ok)
                 self.assertFalse(empty)
@@ -144,7 +185,7 @@ class TestJrjj(unittest.TestCase):
                 if '803640' in url:return ARTICLE_JJ
                 if '2222222' in url:return ARTICLE_OTHER
                 raise RuntimeError('模拟第二页列表结束')
-            with patch.object(j,'fetch_html',side_effect=fake_fetch):
+            with patch.object(j,'fetch_html',side_effect=fake_fetch), patch.object(j,'fetch_government_xml',return_value=GOV_XML.encode('utf-8')):
                 code=j.main(['--config',str(p/'cfg.json'),'--excel',str(p/'data.xlsx'),'--database',str(p/'cache.sqlite3'),'--output-dir',str(p),'--debug-dir',str(p/'debug'),'--month','2026-10'])
             self.assertEqual(code,0)
             w=load_workbook(p/'data.xlsx')

@@ -12,6 +12,7 @@ import socket
 import shutil
 import sqlite3
 import sys
+import threading
 import time
 from source_feeds import parse_gov_xml, parse_jjxw_json
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from urllib3.util import connection as urllib3_connection
 
 LOG = logging.getLogger('jrjj')
 SOURCES = {
@@ -234,44 +236,65 @@ def fetch_html(session: requests.Session, url: str, timeout: int) -> str:
     return r.text
 
 
-def fetch_gov_xml_ipv4(url: str, timeout: int, user_agent: str) -> str:
-    """Retry annual XML over IPv4 with requests.get after the normal request fails.
+_GOV_IPV4_LOCK = threading.RLock()
 
-    urllib3's address-family selector is process-wide; this bounded fallback
-    runs in the single-threaded crawler, and always restores the original.
-    A proxy may resolve the target remotely, so IPv4 selection is not a
-    workaround for server-side IP restrictions or proxy routing failures.
+
+def fetch_government_xml(session: requests.Session, url: str, timeout: int) -> bytes:
+    """Fetch annual government XML with requests.get; prefer IPv4.
+
+    The government site may have a broken IPv6 route from a cloud runner.
+    urllib3's address-family selector is changed only during the IPv4
+    attempt and always restored afterward. This command-line program uses
+    sequential networking; callers must not run parallel requests during
+    this scoped override. A second normal-stack attempt is used only when
+    the IPv4 connection itself fails.
+
+    Keeping response.content as bytes lets ElementTree honor the XML
+    declaration's encoding instead of guessing through response.text.
     """
-    import urllib3.util.connection as urllib3_connection
+    headers = {
+        'User-Agent': session.headers.get('User-Agent', 'Python requests'),
+        'Accept': 'application/xml, text/xml;q=0.9, */*;q=0.8',
+        'Accept-Language': session.headers.get('Accept-Language', 'zh-CN,zh;q=0.9'),
+        'Referer': 'https://www.jiujiang.gov.cn/zwzx/jrjj/',
+    }
+    connect_timeout = min(max(float(timeout), 1.0), 6.0)
+    read_timeout = max(float(timeout), 2.0)
 
-    try:
-        answers = socket.getaddrinfo('www.jiujiang.gov.cn', 443, type=socket.SOCK_STREAM)
-        ips4 = sorted({row[4][0] for row in answers if row[0] == socket.AF_INET})
-        ips6 = sorted({row[4][0] for row in answers if row[0] == socket.AF_INET6})
-        LOG.warning('政府网站 DNS: IPv4=%s; IPv6=%s', ips4, ips6)
-    except OSError as exc:
-        LOG.warning('政府网站 DNS 诊断失败：%s', exc)
-
-    original_family = urllib3_connection.allowed_gai_family
-    urllib3_connection.allowed_gai_family = lambda: socket.AF_INET
-    try:
-        LOG.warning('政府 XML 使用 requests.get() 强制 IPv4 再试一次')
-        response = requests.get(
+    def get_once() -> bytes:
+        # Direct requests.get, no disabled TLS verification or tokenized URL.
+        with requests.get(
             url,
-            headers={
-                'User-Agent': user_agent,
-                'Accept': 'application/xml,text/xml,*/*;q=0.8',
-                'Referer': 'https://www.jiujiang.gov.cn/zwzx/jrjj/',
-            },
-            timeout=(6, min(timeout, 20)),
-        )
-        response.raise_for_status()
-        if not response.content.strip():
-            raise ValueError('政府 XML 返回空响应')
-        response.encoding = 'utf-8-sig'
-        return response.text
-    finally:
-        urllib3_connection.allowed_gai_family = original_family
+            headers=headers,
+            timeout=(connect_timeout, read_timeout),
+            allow_redirects=True,
+        ) as response:
+            response.raise_for_status()
+            payload = response.content
+            if not payload.strip():
+                raise ValueError('政府年度 XML 请求成功，但响应内容为空')
+            return payload
+
+    try:
+        with _GOV_IPV4_LOCK:
+            old_family = urllib3_connection.allowed_gai_family
+            urllib3_connection.allowed_gai_family = lambda: socket.AF_INET
+            try:
+                return get_once()
+            finally:
+                urllib3_connection.allowed_gai_family = old_family
+    except requests.exceptions.ConnectionError as first_error:
+        if isinstance(first_error, (requests.exceptions.SSLError, requests.exceptions.ProxyError)):
+            raise
+        LOG.warning('政府 XML IPv4 连接失败，尝试系统默认 IP 协议栈：%s', first_error)
+        try:
+            return get_once()
+        except requests.exceptions.ConnectionError as second_error:
+            raise requests.exceptions.ConnectionError(
+                f'政府 XML 两次 GET 均无法建立连接（IPv4 优先、默认协议栈回退）。'
+                f'网站或云服务器网络可能限制访问；首次：{first_error}；'
+                f'回退：{second_error}'
+            ) from second_error
 
 
 def fetch_with_browser(url: str, timeout: int) -> str:
@@ -328,15 +351,10 @@ def fetch_list(session: requests.Session, source: str, page: int, cfg: dict,
             session.headers['Accept'] = 'application/json, text/plain, */*'
             session.headers['Referer'] = 'https://www.jjxw.cn/'
         if source == 'gov':
-            try:
-                response_text = fetch_html(session, url, cfg['timeout_seconds'])
-            except requests.RequestException as first_error:
-                LOG.warning('政府 XML 常规请求失败：%s', first_error)
-                response_text = fetch_gov_xml_ipv4(
-                    url, cfg['timeout_seconds'], cfg['user_agent'])
+            response_data = fetch_government_xml(session, url, cfg['timeout_seconds'])
         else:
-            response_text = fetch_html(session, url, cfg['timeout_seconds'])
-        rows = parse_gov_xml(response_text) if source == 'gov' else parse_jjxw_json(response_text)
+            response_data = fetch_html(session, url, cfg['timeout_seconds'])
+        rows = parse_gov_xml(response_data) if source == 'gov' else parse_jjxw_json(response_data)
         news = [News(source, title, link, published) for title, link, published in rows]
         if not news:
             if source == 'jjxw' and page > 0:
