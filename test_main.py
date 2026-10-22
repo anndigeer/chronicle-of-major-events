@@ -621,6 +621,112 @@ class TestJjxw(unittest.TestCase):
             self.assertEqual(wb.active['D2'].value, '黄强')
             self.assertTrue((output / '市委大事记（2026年9月）.docx').exists())
 
+    def test_names_xlsx_detects_header_in_non_first_column(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            wb = Workbook()
+            ws = wb.active
+            ws.append(['部门', '职务', '姓名'])
+            ws.append(['办公室', '主任', '黄强'])
+            ws.append(['办公室', '副主任', '陈云'])
+            ws.append(['办公室', '副主任', '黄强'])
+            ws.append(['办公室', '职工', None])
+            wb.save(p / 'names.xlsx')
+            self.assertEqual(
+                j.read_names_excel(p / 'names.xlsx'), ['黄强', '陈云'])
+            (p / 'config.json').write_text(
+                json.dumps(dict(j.config_defaults(), names=['老名单']),
+                           ensure_ascii=False), encoding='utf-8')
+            (p / 'names.txt').write_text('另一个名单\n', encoding='utf-8')
+            cfg = j.load_config(p / 'config.json')
+            self.assertEqual(cfg['names_source'], 'names.xlsx')
+            self.assertEqual(j.get_names(cfg), ['黄强', '陈云'])
+
+    def test_names_xlsx_without_header_reads_column_a(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder) / 'names.xlsx'
+            wb = Workbook()
+            ws = wb.active
+            ws.append(['陈云', '项目科'])
+            ws.append(['邓永翔', '会议组'])
+            ws.append(['陈云', '重复'])
+            wb.save(p)
+            self.assertEqual(j.read_names_excel(p), ['陈云', '邓永翔'])
+
+    def test_names_xlsx_header_in_second_row(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder) / 'names.xlsx'
+            wb = Workbook()
+            ws = wb.active
+            ws.append(['名单'])
+            ws.append(['序号', '姓名', '部门'])
+            ws.append([1, '庄兆林', '市委'])
+            ws.append([2, '黄喜忠', '组织'])
+            wb.save(p)
+            self.assertEqual(j.read_names_excel(p), ['庄兆林', '黄喜忠'])
+
+    def test_names_xlsx_invalid_cells_include_coordinates(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder) / 'names.xlsx'
+            wb = Workbook()
+            ws = wb.active
+            ws.append(['序号', '姓名'])
+            ws.append([1, '陈云'])
+            ws.append([2, '主任 李四'])
+            wb.save(p)
+            with self.assertRaisesRegex(ValueError, 'B3'):
+                j.read_names_excel(p)
+            wb = Workbook()
+            ws = wb.active
+            ws.append(['姓名', '姓名'])
+            ws.append(['陈云', '黄强'])
+            wb.save(p)
+            with self.assertRaisesRegex(ValueError, '多个'):
+                j.read_names_excel(p)
+            ws.delete_cols(2)
+            ws.delete_rows(2)
+            wb.save(p)
+            with self.assertRaisesRegex(ValueError, '未找到有效姓名'):
+                j.read_names_excel(p)
+
+    def test_check_names_does_not_write_any_files_or_connect(self):
+        import io
+        from contextlib import redirect_stdout
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            wb = Workbook()
+            wb.active.append(['姓名'])
+            wb.active.append(['陈云'])
+            wb.active.append(['黄强'])
+            wb.save(p / 'names.xlsx')
+            with patch.object(j, 'fetch_list', side_effect=AssertionError('network')), \
+                 patch.object(j, 'connect_db', side_effect=AssertionError('database')):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    rc = j.main(['--check-names'], base_dir=p)
+            self.assertEqual(rc, 0)
+            self.assertIn('生效姓名：2 人', output.getvalue())
+            self.assertIn('姓名来源：names.xlsx', output.getvalue())
+            self.assertFalse((p / 'results').exists())
+            self.assertFalse((p / 'config.json').exists())
+
+    def test_local_excel_switch_to_txt_without_changing_json(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            stored = dict(j.config_defaults(), names=['旧人员'])
+            (p / 'config.json').write_text(
+                json.dumps(stored, ensure_ascii=False), encoding='utf-8')
+            wb = Workbook()
+            wb.active.append(['姓名'])
+            wb.active.append(['黄强'])
+            wb.save(p / 'names.xlsx')
+            (p / 'names.txt').write_text('陈云\n', encoding='utf-8')
+            self.assertEqual(j.load_config(p / 'config.json')['names'], ['黄强'])
+            (p / 'names.xlsx').unlink()
+            self.assertEqual(j.load_config(p / 'config.json')['names'], ['陈云'])
+            (p / 'names.txt').unlink()
+            self.assertEqual(j.load_config(p / 'config.json')['names'], ['旧人员'])
+
     def test_news_json_api(self):
         obj = {'data': {'list': [
             {'fileID': 190001, 'publishTime': '2026-09-18 10:00:00',

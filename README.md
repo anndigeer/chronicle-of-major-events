@@ -15,9 +15,9 @@ cd .\chronicle-of-major-events
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
-# 第一次使用：复制一份个人名单并在记事本打开
-Copy-Item .\names.example.txt .\names.txt
-notepad .\names.txt
+# 推荐将原始Excel的姓名表保存为项目目录中的names.xlsx
+# 检查实际生效的人名及数量
+.\.venv\Scripts\python.exe main.py --check-names
 
 # 保存名单后进行离线自检
 .\.venv\Scripts\python.exe main.py --test
@@ -92,45 +92,69 @@ Excel 新增 **I 列「事件日期」**，A—H 列的人工操作位置不变�
 | `python main.py 2026-09 --sync` | 同步新闻和正文缓存，不生成 Word |
 | `python main.py 2026-09 --export` | 不更新新闻列表；重新导出 Word（必要时补抓正文） |
 | `python main.py 2026-09 --verify` | 离线检查该月已生成的 Excel 与 Word |
+| `python main.py --check-names` | 离线检查生效名单及人数，不联网、不修改文件 |
 | `python main.py --help` | 查看所有参数 |
 
 > 表中的 `python` 可替换为 Windows 的 `.\.venv\Scripts\python.exe`。没有额外的年份、网站、数据库路径或工作表参数；翻页数、延迟、超时和姓名等在 `config.json` 中配置。
 
-## 批量录入 30 多个人名：只需粘贴，不用改 JSON
+## 批量录入 30 多个人名：直接保存 Excel（推荐）
 
-**推荐使用 `names.txt`**，放在 `main.py` 同一个目录；它是你电脑上的私人名单，已加入 `.gitignore`，以后更新代码不会修改它。首次在 PowerShell 执行：
+在 Windows 的 Excel 或 WPS 中打开原始通讯录，保留**第一个工作表**。
+把需要匹配的人名所在列的表头设为**「姓名」**，将文件另存为
+**names.xlsx**，放到与 main.py 同一级的项目目录。无需逐一输入、复制粘贴或修改 JSON。
+
+程序扫描第一张工作表前 10 行，自动识别「姓名」列，
+所以姓名在 A、B、C 等任意列都可以。部门、职务等其他列不会用于匹配；
+没有“姓名”表头时，默认读取 A 列。空行跳过、重复姓名去重且保留顺序。
+若混入序号、职务、多个姓名或无效字符，会提示对应 Excel 单元格（例如 B17）。
+请先保存为 .xlsx，旧 .xls 需在 Excel/WPS 中另存为 .xlsx。
+
+| 序号 | 姓名 | 部门 |
+|---|---|---|
+| 1 | 陈云 | 部门甲 |
+| 2 | 邓永翔 | 部门乙 |
+| 3 | 黄强 | 部门丙 |
+
+**先执行离线名单检查命令：**
 
 ~~~powershell
-Copy-Item .\names.example.txt .\names.txt
+.\.venv\Scripts\python.exe main.py --check-names
+~~~
+
+会显示“姓名来源：names.xlsx”“生效姓名：N 人”和全部人名。
+该命令**不联网、不创建数据库、不修改 Excel**，建议每次替换 30 多人名单后先运行。
+
+### 仍可用 names.txt 批量粘贴
+
+从 Excel 复制一列人名到记事本，保存为 UTF-8 的 names.txt。
+首次可使用以下命令创建空白示例，再修改内容：
+
+~~~powershell
+if (-not (Test-Path .\names.txt)) { Copy-Item .\names.example.txt .\names.txt }
 notepad .\names.txt
 ~~~
 
-在 Excel/WPS 中把所有姓名放在**一列**（不需要序号和职务），选中整列中的人名，按 `Ctrl+C`，回到记事本 `Ctrl+V` 粘贴并 `Ctrl+S` 保存。每行一个：
+支持一行一人或“陈云、邓永翔，黄强;陈永奇”这种分隔形式，
+自动跳过空行、注释、姓名表头和重复名字。
 
-~~~text
-张三
-李四
-欧阳修
-阿布都·拉西提
-~~~
+**优先级：names.xlsx → names.txt → config.json 原有名单。**
+三个来源**不合并**；两个本地文件同时存在时以 names.xlsx 为准。
+如果优先文件有错误，程序直接提示，不会默默使用旧名单。
+本地 names.xlsx、names.txt 都由 .gitignore 排除，不会随 git pull 覆盖。
+银河麒麟/Linux 同样支持。
 
-程序也接受一行输入：`张三、李四，欧阳修;阿布都·拉西提`，支持换行、制表符、中文/英文逗号、顿号、分号。空行、以 `#` 开头的注释、Excel 表头“姓名”会被跳过；**重复姓名自动去重**，保留粘贴顺序。带职务、序号、异常字符的内容会提示行号，不会静默加入名单。注意姓名中间的 `·` 不会被当作分隔符。
-
-**优先级：** 只要 `names.txt` 存在，就以其全部姓名为准，不与 `config.json` 里的 `names` 混合；如删掉 `names.txt`，仍兼容旧版 JSON 名单。文件存在但为空会明确报错，避免意外继续使用旧名单。请使用 UTF-8 文本，Windows 记事本的 UTF-8（包括 BOM）均支持。
-
-更换名单后无需重新下载已缓存的新闻，可以直接运行：
+更换名单后，缓存中的正文无需重新下载：
 
 ~~~powershell
 .\.venv\Scripts\python.exe main.py 2026-09 --export
 ~~~
 
-程序会按最新名单重新判断 Excel 的 C/D 列命中情况，并重新生成 Word；**E 列人工收录/排除、I 列事件日期不会因此被覆盖**。若首次尚未采集，则直接运行 `python main.py 2026-09`。
-
-银河麒麟/Linux 同样可以执行 `cp names.example.txt names.txt`，然后用文本编辑器填写，一行一人。
+程序按新名单刷新 Excel 的 C/D 列和 Word，保留 E 列人工选择与 I 列事件日期。
+还没有采集时正常运行 python main.py 2026-09。
 
 ## 修改姓名、人工筛选与历史记录
 
-姓名优先从 `names.txt` 读取；若没有该文件则兼容 `config.json` 的旧名单。`include_body_matches` 决定是否在正文查找姓名，绝不会抓取外部政要名单。
+姓名优先从 `names.xlsx` 读取，其次是 `names.txt`，最后是 `config.json` 的旧名单。`include_body_matches` 决定是否在正文查找姓名，绝不会抓取外部政要名单。
 
 Excel 的 E 列可填“收录”或“排除”；旧的黄色单元格标记仍表示人工收录。人工修改后，先保存并关闭 Excel，再执行 `python main.py 2026-09 --export`。Word 以正文为依据判断重复：即使标题不同，正文实质相同也合并；标题相同但报道内容不同则分别保留。
 

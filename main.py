@@ -131,6 +131,70 @@ def parse_names_text(content: str) -> list[str]:
     return found
 
 
+def read_names_excel(path: Path) -> list[str]:
+    """Read the names column in the first worksheet of a local .xlsx file.
+
+    Use a column headed 姓名 within the first 10 rows if present; otherwise
+    use column A. Do not read unrelated department/position columns. Reject
+    invalid cells with their Excel coordinates rather than guessing.
+    """
+    try:
+        book = load_workbook(path, read_only=True, data_only=True)
+    except Exception as exc:
+        raise ValueError(
+            f'无法读取姓名Excel：{path.name}；请确认是有效.xlsx文件且未损坏：{exc}'
+        ) from exc
+    try:
+        sheet = book.worksheets[0]
+        name_columns = []
+        for row in sheet.iter_rows(min_row=1, max_row=min(sheet.max_row, 10),
+                                   max_col=min(sheet.max_column, 30)):
+            for cell in row:
+                if norm_space(cell.value) in ('姓名', '人名'):
+                    name_columns.append((cell.row, cell.column))
+        if len(name_columns) > 1:
+            raise ValueError(
+                'names.xlsx 前10行出现多个“姓名”表头，'
+                '请保留一个姓名列，或将所需姓名复制到A列')
+        header_row, column = name_columns[0] if name_columns else (0, 1)
+        found: list[str] = []
+        seen: set[str] = set()
+        for row in sheet.iter_rows(min_row=header_row + 1, min_col=column,
+                                   max_col=column):
+            cell = row[0]
+            if cell.value is None:
+                continue
+            raw = norm_space(cell.value)
+            if not raw or raw.startswith(('#', '＃')) or raw in ('姓名', '人名', '关键词'):
+                continue
+            # One cell = one personal name, never silently split a text cell
+            # that might be an unrelated description or two separate people.
+            if not 2 <= len(raw) <= 30 or not NAME_TOKEN.fullmatch(raw):
+                raise ValueError(
+                    f'names.xlsx {cell.coordinate} 单元格姓名格式不正确：{raw!r}；'
+                    '请只保留人名（不要包含序号、职务或多个姓名）')
+            if raw not in seen:
+                seen.add(raw)
+                found.append(raw)
+        if not found:
+            raise ValueError(
+                'names.xlsx 未找到有效姓名；请在第一个工作表填写姓名列')
+        return found
+    finally:
+        book.close()
+
+
+def resolve_names_file(path: Path, fallback: list[str]) -> tuple[list[str], str]:
+    """Local spreadsheet takes precedence, then pasted text, then JSON."""
+    excel = path.with_name('names.xlsx')
+    text_file = path.with_name('names.txt')
+    if excel.is_file():
+        return read_names_excel(excel), excel.name
+    if text_file.is_file():
+        return parse_names_text(text_file.read_text(encoding='utf-8-sig')), text_file.name
+    return fallback, path.name if path.is_file() else '默认配置'
+
+
 def config_defaults() -> dict:
     return {
         'names': DEFAULT_NAMES,
@@ -143,24 +207,25 @@ def config_defaults() -> dict:
     }
 
 
-def load_config(path: Path) -> dict:
-    if not path.exists():
+def load_config(path: Path, *, create_missing: bool = True) -> dict:
+    if not path.exists() and create_missing:
         path.write_text(json.dumps(config_defaults(), ensure_ascii=False, indent=2), encoding='utf-8')
         LOG.info('已创建配置文件：%s', path)
-    data = json.loads(path.read_text(encoding='utf-8'))
+    data = json.loads(path.read_text(encoding='utf-8')) if path.is_file() else {}
+    if not isinstance(data, dict):
+        raise ValueError('config.json 须为JSON对象')
     cfg = {**config_defaults(), **data}
     if (not isinstance(cfg['names'], list)
             or not all(isinstance(name, str) for name in cfg['names'])):
         raise ValueError('names 必须是字符串数组，例如 ["陈云", "黄强"]')
     cfg['names'] = list(dict.fromkeys(
         norm_space(x) for x in cfg['names'] if norm_space(x) and len(norm_space(x)) >= 2))
-    # names.txt is local and gitignored. It overrides config.json, allowing
-    # 30+ names to be pasted directly from Excel without editing JSON.
-    names_file = path.with_name('names.txt')
-    if names_file.is_file():
-        cfg['names'] = parse_names_text(names_file.read_text(encoding='utf-8-sig'))
-        LOG.info('已从 %s 批量读取 %d 个人名，优先于config.json中的names',
-                 names_file, len(cfg['names']))
+    # Local names.xlsx takes precedence over names.txt and JSON. Do not
+    # concatenate sources: an old test roster must not leak into matches.
+    cfg['names'], cfg['names_source'] = resolve_names_file(path, cfg['names'])
+    if cfg['names_source'] != path.name:
+        LOG.info('已从 %s 读取 %d 个人名', cfg['names_source'],
+                 len(cfg['names']))
     grace = cfg['late_publication_days']
     if type(grace) is not int or not 0 <= grace <= 31:
         raise ValueError('late_publication_days 必须为 0～31 的整数')
@@ -1082,6 +1147,8 @@ def args_parser():
     operation = parser.add_mutually_exclusive_group()
     operation.add_argument('--test', action='store_true',
                            help='运行离线测试，不联网也不创建采集文件')
+    operation.add_argument('--check-names', action='store_true',
+                           help='离线检查生效的人名数量与完整名单，不访问新闻网站')
     operation.add_argument('--sync', action='store_true',
                            help='只同步新闻到Excel和正文缓存，不生成Word')
     operation.add_argument('--export', action='store_true',
@@ -1100,6 +1167,15 @@ def main(argv=None, *, base_dir: Path | None = None) -> int:
         import subprocess
         return subprocess.call(
             [sys.executable, '-m', 'unittest', '-v', 'test_main'], cwd=root)
+    if args.check_names:
+        # Read-only: no network, no SQLite/Excel outputs or config creation.
+        cfg = load_config(root / 'config.json', create_missing=False)
+        names = get_names(cfg)
+        print(f'姓名来源：{cfg["names_source"]}')
+        print(f'生效姓名：{len(names)} 人')
+        for i, name in enumerate(names, 1):
+            print(f'{i:>2}. {name}')
+        return 0
 
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s',
                         datefmt='%H:%M:%S')

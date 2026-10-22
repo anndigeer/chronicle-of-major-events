@@ -22,3 +22,5 @@ Thumbs.db
 results/
 # Local name list; keep personal edits across git pull
 names.txt
+# Local spreadsheet of names, not committed
+names.xlsx
