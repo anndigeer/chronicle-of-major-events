@@ -1,6 +1,6 @@
 # 九江新闻网 · 市委大事记整理工具
 
-只采集 **九江新闻网「九江时政」**。运行时从公开 JSON 接口获取新闻列表及正文，优先根据本地 `names.xlsx`、其次 `names.txt` 或旧版 `config.json` 中的姓名名单筛选，生成 Excel、Word，使用 SQLite 缓存并对 Word 正文去重。**不采集九江市政府网站**，也不会自动添加外部政要姓名。
+**新闻文章仅采集九江新闻网「九江时政」**；领导人名单另可从大江网江西领导页面自动更新。运行时从公开 JSON 接口获取新闻列表及正文，优先根据本地 `names.xlsx`、其次 `names.txt` 或旧版 `config.json` 中的姓名名单筛选，生成 Excel、Word，使用 SQLite 缓存并对 Word 正文去重。**不采集九江市政府网站**，也不会自动添加外部政要姓名。
 
 ## Windows：在本地电脑运行和测试
 
@@ -93,6 +93,7 @@ Excel 新增 **I 列「事件日期」**，A—H 列的人工操作位置不变�
 | `python main.py 2026-09 --export` | 不更新新闻列表；重新导出 Word（必要时补抓正文） |
 | `python main.py 2026-09 --verify` | 离线检查该月已生成的 Excel 与 Word |
 | `python main.py --check-names` | 离线检查生效名单及人数，不联网、不修改文件 |
+| `python main.py --update-leaders` | 联网更新四个板块领导名单至 names.auto.txt |
 | `python main.py --help` | 查看所有参数 |
 
 > 表中的 `python` 可替换为 Windows 的 `.\.venv\Scripts\python.exe`。没有额外的年份、网站、数据库路径或工作表参数；翻页数、延迟、超时和姓名等在 `config.json` 中配置。
@@ -139,8 +140,8 @@ notepad .\names.txt
 
 **姓名匹配精度：** 如果名单同时包含“陈云”和“陈云飞”，而文章只出现“陈云飞”，程序不会把长姓名内部的“陈云”片段另算成独立命中；如果正文其他位置又单独出现“陈云”，仍会命中两人。运行 `--check-names` 时会提示存在包含关系的姓名，方便人工检查。这个规则只能解决**名单内部**的包含冲突；若名单只有“陈云”，文章出现未录入名单的“陈云飞”时，程序仍可能命中“陈云”，请通过完整名单避免这种情况。
 
-**优先级：names.xlsx → names.txt → config.json 原有名单。**
-三个来源**不合并**；两个本地文件同时存在时以 names.xlsx 为准。
+**人工来源优先级：names.xlsx → names.txt → config.json 原有名单。**
+人工来源三者**不合并**；但会额外加入来自公开页面的 `names.auto.txt`，并去重。两个个人文件同时存在时以 names.xlsx 为准。
 如果优先文件有错误，程序直接提示，不会默默使用旧名单。
 本地 names.xlsx、names.txt 都由 .gitignore 排除，不会随 git pull 覆盖。
 银河麒麟/Linux 同样支持。
@@ -154,9 +155,57 @@ notepad .\names.txt
 程序按新名单刷新 Excel 的 C/D 列和 Word，保留 E 列人工选择与 I 列事件日期。
 还没有采集时正常运行 python main.py 2026-09。
 
+## 从大江网自动更新“省委、人大、政府、政协”领导名单
+
+程序另支持从 [江西领导页面](https://jiangxi.jxnews.com.cn/leader.shtml)
+指定的 `table[width="98%"][border="0"][align="center"][cellpadding="0"][cellspacing="5"]`
+（样式为 `line-height:30px`）提取四个板块中的人名。此页面**只用于更新姓名关键词**，
+新闻报道数据源仍仅为九江新闻网；不会提取“人事任免”报道标题。
+会规范化姓名中的全角空格，并在匹配时对不同板块的重复姓名去重。
+
+手动联网更新：
+
+~~~powershell
+.\.venv\Scripts\python.exe main.py --update-leaders
+~~~
+
+成功后在项目目录生成或更新 **`names.auto.txt`**，按四个板块分组保存。
+`names.auto.txt` 属于**可追踪的公开来源名单**，通过 GitHub 版本历史可查看变化。
+它与个人名单 `names.xlsx` / `names.txt` **分开保存**：
+定时更新只修改自动名单，不覆盖个人文件。
+
+实际匹配名单规则是：
+
+1. 人工部分优先读取 `names.xlsx`，否则读取 `names.txt`，否则使用旧 JSON 名单。
+2. 自动部分来自 `names.auto.txt`；**人工名单与自动名单合并、去重**。
+3. 若有自动名单但没有人工名单文件，自动名单直接生效，默认示例人名不会额外混入。
+4. 无论更新成功与否，你都可以运行 `python main.py --check-names` 查看最终生效姓名。
+
+更新前会验证四个板块均存在姓名，识别失败、网络异常或网页结构变化时
+命令以失败状态退出，**不会清空或覆盖先前成功的 names.auto.txt**。
+正常情况下如果名单未变化也不会重复写文件。
+网页上公布的领导名单不一定实时反映所有职务变化，需要以相关主管机关发布的信息为准。
+
+### 定期自动更新：GitHub Actions
+
+新增 `.github/workflows/leader-names.yml`，默认**每周一北京时间上午 10:15**
+（UTC 02:15）运行；也可在 GitHub **Actions → Update Jiangxi leaders → Run workflow**
+随时手动触发。
+
+工作流用 GitHub 自带权限获取页面、校验四个板块、更新 `names.auto.txt`，
+并仅在内容变化时向 `main` 提交一次；此提交会触发离线 CI。
+首次新增工作流的提交也会触发一次自动更新。
+**GitHub 定时任务运行于 GitHub Runner，而不是你的 Windows 或银河麒麟服务器**；
+使用 `git pull origin main` 即可把更新后的自动名单拉到本地。
+网站连不上、存储库权限限制或定时工作流被 GitHub 停用时，需要检查 Actions 结果，
+不能视为已经成功更新。定时任务可能有延迟。
+
+本地不必定时联网抓姓名；若希望在不连接 GitHub 的服务器上保持更新，
+可以定期执行 `python main.py --update-leaders`，不会改变本地的个人名单文件。
+
 ## 修改姓名、人工筛选与历史记录
 
-姓名优先从 `names.xlsx` 读取，其次是 `names.txt`，最后是 `config.json` 的旧名单。`include_body_matches` 决定是否在正文查找姓名，绝不会抓取外部政要名单。
+人工名单以 `names.xlsx` 为优先，其次是 `names.txt`，最后是 `config.json` 旧名单；如果 `names.auto.txt` 已存在，则与人工姓名去重合并。`include_body_matches` 决定是否在正文查找姓名，绝不会抓取外部政要名单。
 
 Excel 的 E 列可填“收录”或“排除”；旧的黄色单元格标记仍表示人工收录。人工修改后，先保存并关闭 Excel，再执行 `python main.py 2026-09 --export`。Word 以正文为依据判断重复：即使标题不同，正文实质相同也合并；标题相同但报道内容不同则分别保留。
 

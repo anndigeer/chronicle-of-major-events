@@ -1,0 +1,49 @@
+name: Update Jiangxi leaders
+on:
+  workflow_dispatch:
+  schedule:
+    # Every Monday 02:15 UTC = 10:15 Asia/Shanghai/Taipei (UTC+8).
+    - cron: '15 2 * * 1'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/leader-names.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-jiangxi-leaders
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python requirements
+        run: python -m pip install -r requirements.txt
+      - name: Fetch and validate all four sections
+        run: python main.py --update-leaders
+      - name: Commit only changed auto roster
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- names.auto.txt
+          if git diff --cached --quiet; then
+            echo "Leadership roster unchanged."
+          else
+            git commit -m "Update auto-generated Jiangxi leadership names"
+            git push origin HEAD:main
+          fi

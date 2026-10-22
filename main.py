@@ -21,7 +21,7 @@ from pathlib import Path
 from urllib.parse import urljoin, urlsplit, urlunsplit, unquote
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString, Tag
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.oxml import OxmlElement
@@ -36,6 +36,9 @@ from urllib3.util.retry import Retry
 
 LOG = logging.getLogger('jrjj')
 SOURCES = {'jjxw': {'sheet': '九江新闻网', 'base': 'https://www.jjxw.cn/column/668/'}}
+LEADERS_URL = 'https://jiangxi.jxnews.com.cn/leader.shtml'
+LEADER_SECTIONS = ('省委', '人大', '政府', '政协')
+AUTO_NAMES_FILE = 'names.auto.txt'
 DEFAULT_NAMES = ['陈云', '邓永翔', '黄强', '陈永奇', '庄兆林', '黄喜忠']
 HEADERS = ['新闻标题', '发布日期', '自动匹配', '命中姓名', '人工选择', '正文状态', '原文链接', '说明', '事件日期']
 RE_DATE = re.compile(r'(20\d{2})[-年/.](1[0-2]|0?[1-9])[-月/.](3[01]|[12]\d|0?[1-9])(?:日)?(?!\d)')
@@ -184,15 +187,132 @@ def read_names_excel(path: Path) -> list[str]:
         book.close()
 
 
+def extract_leader_groups(markup: str | bytes) -> dict[str, list[str]]:
+    """Extract only names in the four leadership groups in the specified table.
+
+    Never scrape the general portrait list or adjacent 人事任免 headlines.
+    If the page changes shape, fail instead of silently replacing the saved
+    roster with incomplete or unrelated content.
+    """
+    soup = BeautifulSoup(markup, 'html.parser')
+    groups: dict[str, list[str]] = {section: [] for section in LEADER_SECTIONS}
+    tables = [
+        table for table in soup.find_all('table')
+        if (str(table.get('width', '')).strip() == '98%'
+            and str(table.get('border', '')).strip() == '0'
+            and str(table.get('align', '')).lower() == 'center'
+            and str(table.get('cellpadding', '')).strip() == '0'
+            and str(table.get('cellspacing', '')).strip() == '5'
+            and 'line-height:30px' in re.sub(
+                r'\s+', '', str(table.get('style', '')).lower()))
+    ]
+    if not tables:
+        raise ValueError('没有找到江西领导名单指定表格，网页结构可能已变化')
+
+    def heading(value: str) -> str:
+        value = re.sub(r'[\s\u3000:：]+', '', value or '')
+        return value if value in groups else ''
+
+    # The page can use text or image alt/title for section headings.
+    for table in tables:
+        active = ''
+        for node in table.descendants:
+            if isinstance(node, NavigableString):
+                if node.parent and node.parent.name in ('a', 'script', 'style'):
+                    continue
+                text = str(node).strip()
+                if '人事任免' in text:
+                    active = ''
+                    continue
+                active = heading(text) or active
+            elif isinstance(node, Tag) and node.name == 'img':
+                for attr in ('alt', 'title'):
+                    label = heading(str(node.get(attr, '')))
+                    if label:
+                        active = label
+                        break
+            elif isinstance(node, Tag) and node.name == 'a' and active:
+                raw = node.get_text(' ', strip=True)
+                name = re.sub(r'[\s\u3000]+', '', raw)
+                if 2 <= len(name) <= 12 and NAME_TOKEN.fullmatch(name):
+                    if name not in groups[active]:
+                        groups[active].append(name)
+
+    missing = [section for section in LEADER_SECTIONS if not groups[section]]
+    if missing:
+        raise ValueError(
+            '江西领导名单页面缺少板块或人名：' + '、'.join(missing)
+            + '；保留现有名单不覆盖')
+    if len({name for values in groups.values() for name in values}) > 100:
+        raise ValueError('江西领导名单提取异常：人名数量超过100，拒绝覆盖')
+    return groups
+
+
+def render_leader_names(groups: dict[str, list[str]]) -> str:
+    """Deterministic grouped plaintext: unchanged page means no git diff."""
+    lines = [
+        '# 江西省领导自动名单（由程序生成，勿在此文件手动维护）',
+        '# 来源: ' + LEADERS_URL,
+        '# 四个板块人名分别保存；跨板块同名在匹配时自动去重',
+    ]
+    for section in LEADER_SECTIONS:
+        lines.extend(['', f'# {section}', *groups[section]])
+    return '\n'.join(lines) + '\n'
+
+
+def update_leaders(root: Path, session: requests.Session | None = None,
+                   timeout: int = 20) -> tuple[dict[str, list[str]], bool]:
+    """Fetch and atomically save the auto roster, preserving the old on error."""
+    session = session or build_session('Mozilla/5.0 (compatible; news-leader-sync/1.0)')
+    response = session.get(LEADERS_URL, timeout=timeout)
+    response.raise_for_status()
+    groups = extract_leader_groups(response.content)
+    output = root / AUTO_NAMES_FILE
+    contents = render_leader_names(groups)
+    if output.is_file() and output.read_text(encoding='utf-8-sig') == contents:
+        return groups, False
+    root.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+            mode='w', encoding='utf-8', newline='\n',
+            prefix='.names-auto-', suffix='.tmp', dir=root,
+            delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            handle.write(contents)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        os.replace(temporary, output)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return groups, True
+
+
 def resolve_names_file(path: Path, fallback: list[str]) -> tuple[list[str], str]:
-    """Local spreadsheet takes precedence, then pasted text, then JSON."""
+    """Combine manually managed names with the latest public auto roster.
+
+    Manual priority is Excel > TXT > JSON. Auto names are always appended
+    and de-duplicated; updating them cannot erase a user's manual entries.
+    Without a manual file, the generated roster supersedes sample defaults.
+    """
     excel = path.with_name('names.xlsx')
     text_file = path.with_name('names.txt')
+    auto_file = path.with_name(AUTO_NAMES_FILE)
     if excel.is_file():
-        return read_names_excel(excel), excel.name
-    if text_file.is_file():
-        return parse_names_text(text_file.read_text(encoding='utf-8-sig')), text_file.name
-    return fallback, path.name if path.is_file() else '默认配置'
+        manual, source = read_names_excel(excel), excel.name
+    elif text_file.is_file():
+        manual, source = parse_names_text(
+            text_file.read_text(encoding='utf-8-sig')), text_file.name
+    elif auto_file.is_file():
+        manual, source = [], ''
+    else:
+        manual, source = fallback, path.name if path.is_file() else '默认配置'
+    if auto_file.is_file():
+        automatic = parse_names_text(auto_file.read_text(encoding='utf-8-sig'))
+        return list(dict.fromkeys([*manual, *automatic])), (
+            f'{source} + {AUTO_NAMES_FILE}' if source else AUTO_NAMES_FILE)
+    return manual, source
 
 
 def config_defaults() -> dict:
@@ -220,8 +340,8 @@ def load_config(path: Path, *, create_missing: bool = True) -> dict:
         raise ValueError('names 必须是字符串数组，例如 ["陈云", "黄强"]')
     cfg['names'] = list(dict.fromkeys(
         norm_space(x) for x in cfg['names'] if norm_space(x) and len(norm_space(x)) >= 2))
-    # Local names.xlsx takes precedence over names.txt and JSON. Do not
-    # concatenate sources: an old test roster must not leak into matches.
+    # Preserve the manual source priority, and append safely fetched
+    # leadership names from the separately tracked names.auto.txt.
     cfg['names'], cfg['names_source'] = resolve_names_file(path, cfg['names'])
     if cfg['names_source'] != path.name:
         LOG.info('已从 %s 读取 %d 个人名', cfg['names_source'],
@@ -363,7 +483,7 @@ def fetch_list(session: requests.Session, page: int, cfg: dict,
 
 
 def get_names(cfg: dict) -> list[str]:
-    """Use only the explicitly supplied names, in their pasted order."""
+    """Use the stable union of manually entered names and published leaders."""
     return list(dict.fromkeys(cfg['names']))
 
 
@@ -1181,6 +1301,8 @@ def args_parser():
                            help='运行离线测试，不联网也不创建采集文件')
     operation.add_argument('--check-names', action='store_true',
                            help='离线检查生效的人名数量与完整名单，不访问新闻网站')
+    operation.add_argument('--update-leaders', action='store_true',
+                           help='联网更新省委、人大、政府、政协领导名单至names.auto.txt')
     operation.add_argument('--sync', action='store_true',
                            help='只同步新闻到Excel和正文缓存，不生成Word')
     operation.add_argument('--export', action='store_true',
@@ -1199,6 +1321,20 @@ def main(argv=None, *, base_dir: Path | None = None) -> int:
         import subprocess
         return subprocess.call(
             [sys.executable, '-m', 'unittest', '-v', 'test_main'], cwd=root)
+    if args.update_leaders:
+        # Separate workflow from news collection; errors retain the old file.
+        try:
+            groups, updated = update_leaders(root)
+        except Exception as exc:
+            print(f'领导名单更新失败：{exc}', file=sys.stderr)
+            return 1
+        for section, people in groups.items():
+            print(f'{section}：{len(people)} 人 — ' + '、'.join(people))
+        print(f'已保存至 {root / AUTO_NAMES_FILE}' if updated
+              else '名单未变化，无需覆盖已有文件')
+        print('合计去重人数：' +
+              str(len({name for vals in groups.values() for name in vals})))
+        return 0
     if args.check_names:
         # Read-only: no network, no SQLite/Excel outputs or config creation.
         cfg = load_config(root / 'config.json', create_missing=False)

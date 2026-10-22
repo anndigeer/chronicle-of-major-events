@@ -727,6 +727,138 @@ class TestJjxw(unittest.TestCase):
             (p / 'names.txt').unlink()
             self.assertEqual(j.load_config(p / 'config.json')['names'], ['旧人员'])
 
+    def test_leaders_table_only_four_sections_and_normalizes_spaces(self):
+        markup = """
+        <html><body><a href="#">不应收录</a>
+        <table width="98%" border="0" align="center" cellpadding="0"
+               cellspacing="5" style="line-height:30px;">
+          <tr><td>省委</td>
+              <td><a>尹　弘</a> <a>叶建春</a> <a>陈永奇</a></td></tr>
+          <tr><td><img alt="人大"></td>
+              <td><a>尹　弘</a> <a>吴忠琼</a></td></tr>
+          <tr><td>政府</td>
+              <td><a>叶建春</a><a>孙洪山</a></td></tr>
+          <tr><td>政协</td>
+              <td><a>宋福龙</a><a>陈俊卿</a></td></tr>
+          <tr><td>人事任免</td><td><a>旧新闻标题</a></td></tr>
+        </table>
+        <table><tr><td><a>另一则新闻</a></td></tr></table>
+        </body></html>
+        """
+        groups = j.extract_leader_groups(markup)
+        self.assertEqual(groups['省委'], ['尹弘', '叶建春', '陈永奇'])
+        self.assertEqual(groups['人大'], ['尹弘', '吴忠琼'])
+        self.assertEqual(groups['政府'], ['叶建春', '孙洪山'])
+        self.assertEqual(groups['政协'], ['宋福龙', '陈俊卿'])
+        self.assertNotIn('旧新闻标题', j.render_leader_names(groups))
+        self.assertEqual(len(set(sum(groups.values(), []))), 7)
+
+    def test_leaders_wrong_table_or_missing_group_rejected(self):
+        bad_markup = '<html><table><tr><td>省委<a>张三</a></td></tr></table></html>'
+        with self.assertRaisesRegex(ValueError, '指定表格'):
+            j.extract_leader_groups(bad_markup)
+        incomplete = """
+        <table width="98%" border="0" align="center" cellpadding="0"
+               cellspacing="5" style="line-height:30px;">
+          <tr><td>省委</td><td><a>尹弘</a></td></tr>
+          <tr><td>人大</td><td><a>吴忠琼</a></td></tr>
+          <tr><td>政府</td><td><a>叶建春</a></td></tr>
+        </table>
+        """
+        with self.assertRaisesRegex(ValueError, '政协'):
+            j.extract_leader_groups(incomplete)
+
+    def test_update_leaders_creates_auto_file_and_is_idempotent(self):
+        markup = b"""
+        <table width="98%" border="0" align="center" cellpadding="0"
+               cellspacing="5" style="line-height: 30px;">
+        <tr><td>省委</td><td><a>尹弘</a><a>陈永奇</a></td></tr>
+        <tr><td>人大</td><td><a>吴忠琼</a></td></tr>
+        <tr><td>政府</td><td><a>叶建春</a><a>陈永奇</a></td></tr>
+        <tr><td>政协</td><td><a>宋福龙</a></td></tr>
+        </table>"""
+        class Response:
+            content = markup
+            def raise_for_status(self):
+                return None
+        class Session:
+            def get(self, url, **kwargs):
+                self.assert_url = url
+                return Response()
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            groups, changed = j.update_leaders(p, session=Session())
+            self.assertTrue(changed)
+            auto = p / 'names.auto.txt'
+            text = auto.read_text('utf-8')
+            self.assertTrue(text.startswith('# 江西省领导'))
+            self.assertEqual(text.count('\n陈永奇\n'), 2)  # grouped
+            self.assertEqual(len(groups), 4)
+            saved = auto.stat().st_mtime_ns
+            groups2, changed2 = j.update_leaders(p, session=Session())
+            self.assertFalse(changed2)
+            self.assertEqual(groups, groups2)
+            self.assertEqual(auto.stat().st_mtime_ns, saved)
+
+    def test_failed_leaders_update_keeps_last_good_roster(self):
+        class BrokenResponse:
+            content = b'<html>upstream site changed</html>'
+            def raise_for_status(self):
+                return None
+        class Session:
+            def get(self, *_args, **_kwargs):
+                return BrokenResponse()
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            old = '# 省委\n尹弘\n# 人大\n吴忠琼\n# 政府\n叶建春\n# 政协\n宋福龙\n'
+            auto = p / 'names.auto.txt'
+            auto.write_text(old, encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, '指定表格'):
+                j.update_leaders(p, session=Session())
+            self.assertEqual(auto.read_text('utf-8'), old)
+
+    def test_manual_names_and_auto_names_union_without_duplicates(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            (p / 'config.json').write_text(json.dumps(
+                dict(j.config_defaults(), names=['默认人物']), ensure_ascii=False), 'utf-8')
+            auto = '# 省委\n尹弘\n陈永奇\n# 人大\n尹弘\n# 政府\n叶建春\n# 政协\n宋福龙\n'
+            (p / 'names.auto.txt').write_text(auto, encoding='utf-8')
+            cfg = j.load_config(p / 'config.json')
+            self.assertEqual(cfg['names_source'], 'names.auto.txt')
+            self.assertEqual(cfg['names'], ['尹弘', '陈永奇', '叶建春', '宋福龙'])
+            (p / 'names.txt').write_text('陈永奇\n黄强\n', 'utf-8')
+            cfg = j.load_config(p / 'config.json')
+            self.assertEqual(cfg['names'], ['陈永奇', '黄强', '尹弘', '叶建春', '宋福龙'])
+            self.assertEqual(cfg['names_source'], 'names.txt + names.auto.txt')
+            (p / 'names.txt').unlink()
+            wb = Workbook()
+            wb.active.append(['姓名'])
+            wb.active.append(['自定义人员'])
+            wb.save(p / 'names.xlsx')
+            cfg = j.load_config(p / 'config.json')
+            self.assertEqual(cfg['names'],
+                             ['自定义人员', '尹弘', '陈永奇', '叶建春', '宋福龙'])
+            self.assertEqual(cfg['names_source'], 'names.xlsx + names.auto.txt')
+
+    def test_update_leaders_cli_only_writes_auto_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            (p / 'names.txt').write_text('人工甲\n', 'utf-8')
+            fake = {
+                '省委': ['尹弘'], '人大': ['吴忠琼'],
+                '政府': ['叶建春'], '政协': ['宋福龙'],
+            }
+            def stub(root):
+                (root / 'names.auto.txt').write_text(
+                    j.render_leader_names(fake), encoding='utf-8')
+                return fake, True
+            with patch.object(j, 'update_leaders', side_effect=stub):
+                self.assertEqual(j.main(['--update-leaders'], base_dir=p), 0)
+            self.assertEqual((p / 'names.txt').read_text('utf-8'), '人工甲\n')
+            self.assertFalse((p / 'results').exists())
+            self.assertFalse((p / 'config.json').exists())
+
     def test_news_json_api(self):
         obj = {'data': {'list': [
             {'fileID': 190001, 'publishTime': '2026-09-18 10:00:00',
