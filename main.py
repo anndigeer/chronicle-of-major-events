@@ -802,8 +802,40 @@ def fetch_article_details(session: requests.Session, con: sqlite3.Connection,
 
 
 def match_names(title: str, body: str, names: list[str], include_body: bool) -> list[str]:
+    """Match configured names, avoiding substring-only hits inside longer listed names.
+
+    If both 陈云 and 陈云飞 are configured, an occurrence of 陈云 inside
+    陈云飞 does not count as a separate 陈云 mention. A separate occurrence
+    of 陈云 elsewhere in the same article still counts.
+    """
     target = title + ('\n' + body if include_body else '')
-    return [name for name in names if name in target]
+    unique_names = list(dict.fromkeys(name for name in names if name))
+    occurrences: dict[str, list[tuple[int, int]]] = {}
+    for name in unique_names:
+        spans = []
+        start = 0
+        while True:
+            start = target.find(name, start)
+            if start < 0:
+                break
+            spans.append((start, start + len(name)))
+            start += 1
+        occurrences[name] = spans
+
+    matched = []
+    for name in unique_names:
+        for start, end in occurrences[name]:
+            covered_by_longer_name = any(
+                len(other) > len(name)
+                and other_start <= start and end <= other_end
+                for other, spans in occurrences.items()
+                if len(other) > len(name)
+                for other_start, other_end in spans
+            )
+            if not covered_by_longer_name:
+                matched.append(name)
+                break
+    return matched
 
 
 def refresh_book(book, con: sqlite3.Connection, names: list[str], cfg: dict) -> list[dict]:
@@ -1175,6 +1207,13 @@ def main(argv=None, *, base_dir: Path | None = None) -> int:
         print(f'生效姓名：{len(names)} 人')
         for i, name in enumerate(names, 1):
             print(f'{i:>2}. {name}')
+        overlaps = [(short, long) for short in names for long in names
+                    if short != long and short in long]
+        if overlaps:
+            print('注意：名单中存在姓名包含关系；若短姓名只出现在长姓名内部，'
+                  '不会单独计为命中：')
+            for short, long in overlaps:
+                print(f'  {short} ⊂ {long}')
         return 0
 
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s',

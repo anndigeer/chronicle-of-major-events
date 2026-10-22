@@ -749,6 +749,39 @@ class TestJjxw(unittest.TestCase):
             self.assertTrue((p / 'results' / '抓取检查报告.json').exists())
             self.assertFalse((p / 'results' / 'jiujiang_cache.sqlite3').exists())
 
+    def test_short_name_is_not_matched_inside_a_configured_longer_name(self):
+        names = ['陈云', '陈云飞', '黄强']
+        self.assertEqual(
+            j.match_names('陈云飞主持会议', '', names, True), ['陈云飞'])
+        # A standalone occurrence of the short name elsewhere still counts.
+        self.assertEqual(
+            j.match_names('陈云飞主持会议', '陈云随后发言', names, True),
+            ['陈云', '陈云飞'])
+        # Preserve the configured order in the reported matches.
+        self.assertEqual(
+            j.match_names('陈云飞参加会议', '', ['陈云飞', '陈云'], True),
+            ['陈云飞'])
+
+    def test_short_name_remains_matchable_when_no_longer_name_is_configured(self):
+        self.assertEqual(
+            j.match_names('陈云飞参加会议', '', ['陈云'], True), ['陈云'])
+        self.assertEqual(
+            j.match_names('没有提及名单人物', '陈云飞参加会议',
+                          ['陈云'], False), [])
+
+    def test_check_names_warns_about_contained_name_pairs(self):
+        import io
+        from contextlib import redirect_stdout
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            (p / 'config.json').write_text(
+                json.dumps(dict(j.config_defaults(), names=['陈云', '陈云飞']),
+                           ensure_ascii=False), encoding='utf-8')
+            out = io.StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(j.main(['--check-names'], base_dir=p), 0)
+            self.assertIn('陈云 ⊂ 陈云飞', out.getvalue())
+
     def test_organization_terms_not_personal_names(self):
         names = j.get_names(j.config_defaults())
         title = '市人大常委会党组理论学习中心组举行集体学习，廖奇志主持并讲话'
