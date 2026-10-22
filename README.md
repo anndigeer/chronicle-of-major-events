@@ -186,6 +186,49 @@ notepad .\names.txt
 正常情况下如果名单未变化也不会重复写文件。
 网页上公布的领导名单不一定实时反映所有职务变化，需要以相关主管机关发布的信息为准。
 
+### 首次名单快照与实际联网限制
+
+仓库已附带一个**初始网页缓存快照** `names.auto.txt`，
+按省委、人大、政府、政协分组记录可见名单（四组共 35 个席位，人名跨板块去重后 32 人）。
+**它不是脚本刚刚联网抓取的结果，也不能代替实时核验**；
+运行 `--check-names` 会提示这一点。后续任何一次 `--update-leaders`
+成功后，程序会根据目标网页重新生成该文件并清除快照标记。
+
+首次 GitHub Actions 实际测试已发现托管 Runner 访问该站点时出现
+TLS 握手失败，HTTP 访问也不能取得网页，因此当时的自动更新**没有成功**。
+项目不会关闭证书验证，也不会在抓取失败时把缓存快照当成最新数据。
+你可以从可访问网站的 Windows 电脑或银河麒麟服务器执行
+`python main.py --update-leaders`，随后运行 `--check-names` 核实。
+
+### 在 Windows 上设置本地每周更新
+
+在项目根目录 PowerShell 中执行（Windows 计划任务运行时，电脑需要开机且联网）：
+
+~~~powershell
+$project = (Get-Location).Path
+$python = (Resolve-Path .\.venv\Scripts\python.exe).Path
+$script = (Resolve-Path .\main.py).Path
+$action = New-ScheduledTaskAction -Execute $python -Argument ('"' + $script + '" --update-leaders') -WorkingDirectory $project
+$trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At (Get-Date -Hour 10 -Minute 15 -Second 0)
+Register-ScheduledTask -TaskName "JiangxiLeadersWeekly" -Action $action -Trigger $trigger -Description "每周更新江西省领导人名名单"
+~~~
+
+如果 Windows 提示没有创建任务的权限，可以在“任务计划程序”中
+手动创建同名任务：程序设为虚拟环境的 python.exe，参数设为
+main.py 的完整路径加 `--update-leaders`，起始目录设为项目根目录。
+
+### 在银河麒麟上用 cron 每周更新
+
+先确保已安装并启用系统 cron 服务，执行 `crontab -e`，
+以下路径替换为项目在服务器上的实际绝对路径（服务器时区决定执行时间）：
+
+~~~cron
+15 10 * * 1 /home/user/chronicle-of-major-events/.venv/bin/python /home/user/chronicle-of-major-events/main.py --update-leaders >> /tmp/jiangxi-leaders.log 2>&1
+~~~
+
+本地计划任务与 GitHub 每周任务相互独立；如果 GitHub Runner 连接不上网站，
+本地任务能否成功取决于本机网络，**不能保证一定成功**。
+
 ### 定期自动更新：GitHub Actions
 
 新增 `.github/workflows/leader-names.yml`，默认**每周一北京时间上午 10:15**

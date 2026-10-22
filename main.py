@@ -1341,6 +1341,10 @@ def main(argv=None, *, base_dir: Path | None = None) -> int:
         names = get_names(cfg)
         print(f'姓名来源：{cfg["names_source"]}')
         print(f'生效姓名：{len(names)} 人')
+        snapshot = root / AUTO_NAMES_FILE
+        if (snapshot.is_file() and
+                '初始网页快照' in snapshot.read_text(encoding='utf-8-sig').splitlines()[0]):
+            print('提醒：当前 names.auto.txt 为网页缓存快照，尚未通过实时抓取复核。')
         for i, name in enumerate(names, 1):
             print(f'{i:>2}. {name}')
         overlaps = [(short, long) for short in names for long in names

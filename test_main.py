@@ -859,6 +859,22 @@ class TestJjxw(unittest.TestCase):
             self.assertFalse((p / 'results').exists())
             self.assertFalse((p / 'config.json').exists())
 
+    def test_check_names_warns_when_auto_roster_is_unverified_snapshot(self):
+        import io
+        from contextlib import redirect_stdout
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'names.auto.txt').write_text(
+                '# 初始网页快照：待复核\\n'
+                '# 省委\\n尹弘\\n'
+                '# 人大\\n吴忠琼\\n'
+                '# 政府\\n叶建春\\n'
+                '# 政协\\n宋福龙\\n', encoding='utf-8')
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(j.main(['--check-names'], base_dir=root), 0)
+            self.assertIn('尚未通过实时抓取复核', output.getvalue())
+
     def test_news_json_api(self):
         obj = {'data': {'list': [
             {'fileID': 190001, 'publishTime': '2026-09-18 10:00:00',
