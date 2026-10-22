@@ -769,7 +769,7 @@ class TestJjxw(unittest.TestCase):
             j.extract_leader_groups(incomplete)
 
     def test_update_leaders_creates_auto_file_and_is_idempotent(self):
-        markup = b"""
+        markup = """
         <table width="98%" border="0" align="center" cellpadding="0"
                cellspacing="5" style="line-height: 30px;">
         <tr><td>省委</td><td><a>尹弘</a><a>陈永奇</a></td></tr>
