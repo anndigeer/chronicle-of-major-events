@@ -865,11 +865,11 @@ class TestJjxw(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / 'names.auto.txt').write_text(
-                '# 初始网页快照：待复核\\n'
-                '# 省委\\n尹弘\\n'
-                '# 人大\\n吴忠琼\\n'
-                '# 政府\\n叶建春\\n'
-                '# 政协\\n宋福龙\\n', encoding='utf-8')
+                '# 初始网页快照：待复核\n'
+                '# 省委\n尹弘\n'
+                '# 人大\n吴忠琼\n'
+                '# 政府\n叶建春\n'
+                '# 政协\n宋福龙\n', encoding='utf-8')
             output = io.StringIO()
             with redirect_stdout(output):
                 self.assertEqual(j.main(['--check-names'], base_dir=root), 0)
