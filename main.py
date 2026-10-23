@@ -822,10 +822,14 @@ def write_new_rows(book, records: dict[str, list[News]]):
         for idx in range(2, ws.max_row + 1):
             a = ws.cell(idx, 1)
             g = ws.cell(idx, 7)
-            link = canonical_news_url(base, g.value) or canonical_news_url(
-                base, get_cell_url(a))
-            if link:
-                known.add(link)
+            # Both valid candidates represent an existing workbook row,
+            # even when they disagree and await a human decision.
+            a_link = canonical_news_url(base, get_cell_url(a))
+            g_link = canonical_news_url(base, g.value)
+            if a_link:
+                known.add(a_link)
+            if g_link:
+                known.add(g_link)
         added = 0
         for item in sorted(news, key=lambda n: (n.pub_date, n.title)):
             url = canonical_news_url(base, item.url)
@@ -1691,6 +1695,10 @@ def main(argv=None, *, base_dir: Path | None = None) -> int:
                 LOG.error('有%d篇已选新闻正文未抓取成功，Word可能缺少文章；下次将重试', len(failed))
             if not word or failed:
                 return 1  # Do not report a complete monthly export.
+    if link_conflicts:
+        LOG.error('仍有%d行A/G链接待人工复核，详见results/链接冲突待复核.csv；'
+                  '本次结果不标记为完整成功', len(link_conflicts))
+        return 1
     LOG.info('完成。输出文件位于：%s', results)
     return 0
 
