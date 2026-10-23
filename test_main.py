@@ -70,6 +70,31 @@ class TestJjxw(unittest.TestCase):
             '某事项继续推进', ['此前9月30日的统计数字显示全市情况。'],
             '2026-10-04'), '')
 
+    def test_report_date_is_not_mistaken_for_prior_month_event(self):
+        text = '10月2日，记者从有关部门获悉，9月30日，市委主持召开专题会议。'
+        self.assertEqual(j.infer_event_date('重点会议', [text], '2026-10-02'),
+                         '2026-09-30')
+        text = '截至9月30日，全市召开了工作会议12场。'
+        self.assertEqual(j.infer_event_date('情况通报', [text], '2026-10-02'), '')
+
+    def test_relative_event_dates_and_cross_year(self):
+        self.assertEqual(j.infer_event_date(
+            '工作动态', ['前天，市领导主持召开会议。'], '2026-10-02'),
+            '2026-09-30')
+        self.assertEqual(j.infer_event_date(
+            '工作动态', ['前日，市委举行座谈会。'], '2027-01-02'),
+            '2026-12-31')
+        self.assertEqual(j.infer_event_date(
+            '工作动态', ['上月30日，市领导主持召开会议。'], '2026-10-03'),
+            '2026-09-30')
+        self.assertEqual(j.infer_event_date(
+            '工作动态', ['本月2日，市领导调研基层情况。'], '2026-10-03'),
+            '2026-10-02')
+        self.assertEqual(j.infer_event_date(
+            '工作动态', ['上月31日，市领导召开会议。'], '2026-05-03'), '')
+        self.assertEqual(j.infer_event_date(
+            '工作动态', ['下月2日将举行会议。'], '2026-10-03'), '')
+
     def test_future_schedule_and_october_event_not_backdated(self):
         self.assertEqual(j.infer_event_date(
             '会议计划', ['将于9月30日举行新闻发布会。'],
@@ -947,7 +972,7 @@ class TestJjxw(unittest.TestCase):
                                          j.SOURCES['jjxw']['base'], con), g_url)
                 self.assertEqual(ws['A2'].hyperlink.target, g_url)
 
-    def test_conflicting_cached_links_without_unique_title_keep_g_priority(self):
+    def test_conflicting_cached_links_without_unique_title_needs_review(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             a_url = 'https://www.jjxw.cn/article/2026/09/18/100.html'
@@ -964,10 +989,11 @@ class TestJjxw(unittest.TestCase):
                 ws['G2'] = g_url
                 self.assertEqual(
                     j.reconcile_row_link([ws.cell(2, col) for col in range(1, 10)],
-                                         j.SOURCES['jjxw']['base'], con), g_url)
-                self.assertEqual(ws['A2'].hyperlink.target, g_url)
+                                         j.SOURCES['jjxw']['base'], con), '')
+                self.assertEqual(ws['A2'].hyperlink.target, a_url)
+                self.assertEqual(ws['G2'].value, g_url)
 
-    def test_hyperlink_g_wins_when_a_has_wrong_unknown_target(self):
+    def test_unknown_a_g_conflict_is_not_silently_overwritten(self):
         with tempfile.TemporaryDirectory() as folder:
             p = Path(folder)
             a_url = 'https://www.jjxw.cn/article/2026/09/18/111.html'
@@ -979,9 +1005,71 @@ class TestJjxw(unittest.TestCase):
             self.assertEqual(
                 j.reconcile_row_link(
                     [ws.cell(2, i) for i in range(1, 10)],
-                    j.SOURCES['jjxw']['base']), g_url)
-            self.assertEqual(ws['A2'].hyperlink.target, g_url)
+                    j.SOURCES['jjxw']['base']), '')
+            self.assertEqual(ws['A2'].hyperlink.target, a_url)
             self.assertEqual(ws['G2'].value, g_url)
+
+    def test_ambiguous_link_conflict_report_and_duplicate_prevention(self):
+        import csv
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            a_url = 'https://www.jjxw.cn/article/2026/09/18/100.html'
+            g_url = 'https://www.jjxw.cn/article/2026/09/19/200.html'
+            with j.connect_db(root / 'db.sqlite3') as con:
+                wb = j.open_book(root / 'news.xlsx')
+                ws = wb.active
+                ws['A2'] = '这条报道待核对'
+                ws['A2'].hyperlink = a_url
+                ws['G2'] = g_url
+                ws['E2'] = '收录'
+                ws['I2'] = '2026-09-18'
+                ws['A2'].fill = PatternFill('solid', fgColor='FFFF00')
+                issues = []
+                existing = j.existing_rows(wb, con, issues)
+                self.assertEqual(existing['jjxw'], {a_url, g_url})
+                self.assertEqual(len(issues), 1)
+                self.assertEqual(issues[0]['row'], 2)
+                self.assertEqual(ws['A2'].hyperlink.target, a_url)
+                self.assertEqual(ws['G2'].value, g_url)
+                self.assertEqual(ws['E2'].value, '收录')
+                self.assertEqual(ws['I2'].value, '2026-09-18')
+                self.assertTrue(j.is_yellow(ws['A2']))
+                # A later crawl can see these URLs without duplicating rows.
+                j.write_new_rows(wb, {'jjxw': [
+                    j.News('jjxw', '已存在A', a_url, '2026-09-18'),
+                    j.News('jjxw', '已存在G', g_url, '2026-09-19')]})
+                self.assertEqual(ws.max_row, 2)
+                path = root / 'results' / '链接冲突待复核.csv'
+                j.write_link_review_report(issues, path)
+                with path.open(encoding='utf-8-sig', newline='') as stream:
+                    rows = list(csv.reader(stream))
+                self.assertEqual(len(rows), 2)
+                self.assertEqual(rows[1][0], '2')
+                self.assertEqual(rows[1][2:4], [a_url, g_url])
+                # The fixed-name report disappears after successful review.
+                j.write_link_review_report([], path)
+                self.assertFalse(path.exists())
+
+    def test_link_conflict_export_cli_returns_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            output = root / 'results'
+            output.mkdir()
+            wb = j.open_book(output / 'jiujiang_news.xlsx')
+            ws = wb.active
+            a_url = 'https://www.jjxw.cn/article/2026/09/18/100.html'
+            g_url = 'https://www.jjxw.cn/article/2026/09/18/200.html'
+            ws['A2'] = '待人工确认的新闻'
+            ws['A2'].hyperlink = a_url
+            ws['G2'] = g_url
+            wb.save(output / 'jiujiang_news.xlsx')
+            with patch.object(j, 'fetch_article_details'):
+                code = j.main(['2026-09', '--sync'], base_dir=root)
+            self.assertEqual(code, 1)
+            self.assertTrue((output / '链接冲突待复核.csv').is_file())
+            actual = load_workbook(output / 'jiujiang_news.xlsx')
+            self.assertEqual(actual.active['A2'].hyperlink.target, a_url)
+            self.assertEqual(actual.active['G2'].value, g_url)
 
     def test_formula_hyperlink_migrates_to_native_and_keeps_color(self):
         with tempfile.TemporaryDirectory() as folder:
