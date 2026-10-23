@@ -676,15 +676,29 @@ def reconcile_row_link(row, base: str, con: sqlite3.Connection | None = None,
     if not (a_url or g_url):
         return ''
     choice = g_url or a_url
+    title = get_cell_title(a)
     if a_url and g_url and a_url != g_url:
         if con is not None:
-            db_urls = {n['url'] for n in con.execute(
-                'SELECT url FROM news WHERE source=? AND url IN (?,?)',
+            cached = {n['url']: n for n in con.execute(
+                'SELECT url,title,article_title FROM news '
+                'WHERE source=? AND url IN (?,?)',
                 (source, a_url, g_url))}
-            if a_url in db_urls and g_url not in db_urls:
+            # Both URLs can already exist in SQLite (e.g. a shifted G
+            # column). Match the visible title against the authoritative
+            # article/list titles before using the G-column fallback.
+            visible = clean_title(title).casefold()
+            title_matches = {
+                url for url, n in cached.items()
+                if visible and visible in {
+                    clean_title(n['title']).casefold(),
+                    clean_title(n['article_title']).casefold()
+                }
+            }
+            if len(title_matches) == 1:
+                choice = next(iter(title_matches))
+            elif a_url in cached and g_url not in cached:
                 choice = a_url
         LOG.warning('A列超链接与G列原文链接冲突，统一为：%s', choice)
-    title = get_cell_title(a)
     if a.data_type == 'f' and title:
         a.value = title
     if not a.hyperlink or a.hyperlink.target != choice:
