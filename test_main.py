@@ -903,6 +903,70 @@ class TestJjxw(unittest.TestCase):
                 self.assertEqual(actual.active['A2'].hyperlink.target,
                                  actual.active['G2'].value)
 
+    def test_conflicting_cached_links_use_unique_matching_title(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            a_url = 'https://www.jjxw.cn/article/2026/09/18/100.html'
+            g_url = 'https://www.jjxw.cn/article/2026/09/18/200.html'
+            with j.connect_db(root / 'cache.sqlite3') as con:
+                for url, title in [(a_url, '甲会议报道'), (g_url, '乙会议报道')]:
+                    con.execute(
+                        "INSERT INTO news(url,source,title,pub_date,article_title) "
+                        "VALUES(?,?,?,?,?)",
+                        (url, 'jjxw', title, '2026-09-18', title))
+                wb = j.open_book(root / 'news.xlsx')
+                ws = wb.active
+                ws['A2'] = '甲会议报道'
+                ws['A2'].hyperlink = a_url
+                ws['G2'] = g_url
+                ws['E2'] = '排除'
+                ws['I2'] = '2026-09-17'
+                self.assertEqual(j.existing_rows(wb, con)['jjxw'], {a_url})
+                self.assertEqual(ws['A2'].hyperlink.target, a_url)
+                self.assertEqual(ws['G2'].value, a_url)
+                self.assertEqual(ws['E2'].value, '排除')
+                self.assertEqual(ws['I2'].value, '2026-09-17')
+
+    def test_conflicting_cached_links_choose_g_when_its_title_matches(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            a_url = 'https://www.jjxw.cn/article/2026/09/18/100.html'
+            g_url = 'https://www.jjxw.cn/article/2026/09/18/200.html'
+            with j.connect_db(root / 'cache.sqlite3') as con:
+                for url, title in [(a_url, '甲会议报道'), (g_url, '乙会议报道')]:
+                    con.execute(
+                        "INSERT INTO news(url,source,title,pub_date) VALUES(?,?,?,?)",
+                        (url, 'jjxw', title, '2026-09-18'))
+                wb = j.open_book(root / 'news.xlsx')
+                ws = wb.active
+                ws['A2'] = '乙会议报道'
+                ws['A2'].hyperlink = a_url
+                ws['G2'] = g_url
+                self.assertEqual(
+                    j.reconcile_row_link([ws.cell(2, col) for col in range(1, 10)],
+                                         j.SOURCES['jjxw']['base'], con), g_url)
+                self.assertEqual(ws['A2'].hyperlink.target, g_url)
+
+    def test_conflicting_cached_links_without_unique_title_keep_g_priority(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            a_url = 'https://www.jjxw.cn/article/2026/09/18/100.html'
+            g_url = 'https://www.jjxw.cn/article/2026/09/18/200.html'
+            with j.connect_db(root / 'cache.sqlite3') as con:
+                for url in (a_url, g_url):
+                    con.execute(
+                        "INSERT INTO news(url,source,title,pub_date) VALUES(?,?,?,?)",
+                        (url, 'jjxw', '相同标题', '2026-09-18'))
+                wb = j.open_book(root / 'news.xlsx')
+                ws = wb.active
+                ws['A2'] = '相同标题'
+                ws['A2'].hyperlink = a_url
+                ws['G2'] = g_url
+                self.assertEqual(
+                    j.reconcile_row_link([ws.cell(2, col) for col in range(1, 10)],
+                                         j.SOURCES['jjxw']['base'], con), g_url)
+                self.assertEqual(ws['A2'].hyperlink.target, g_url)
+
     def test_hyperlink_g_wins_when_a_has_wrong_unknown_target(self):
         with tempfile.TemporaryDirectory() as folder:
             p = Path(folder)
