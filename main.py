@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from contextlib import contextmanager
 import logging
@@ -664,12 +665,9 @@ def canonical_news_url(base: str, href: object) -> str:
 
 
 def reconcile_row_link(row, base: str, con: sqlite3.Connection | None = None,
-                       source: str = 'jjxw') -> str:
-    """Make A hyperlink target and G URL identical, preserving human edits.
-
-    When A/G conflict, prefer the link present in the database. Otherwise,
-    prefer the validated G value (the designated original-link column).
-    """
+                       source: str = 'jjxw',
+                       conflicts: list[dict] | None = None) -> str:
+    """Reconcile A/G only with unique title evidence; retain ambiguous links."""
     a, g = row[0], row[6]
     a_url = canonical_news_url(base, get_cell_url(a))
     g_url = canonical_news_url(base, g.value)
@@ -678,27 +676,32 @@ def reconcile_row_link(row, base: str, con: sqlite3.Connection | None = None,
     choice = g_url or a_url
     title = get_cell_title(a)
     if a_url and g_url and a_url != g_url:
+        cached = {}
         if con is not None:
             cached = {n['url']: n for n in con.execute(
                 'SELECT url,title,article_title FROM news '
                 'WHERE source=? AND url IN (?,?)',
                 (source, a_url, g_url))}
-            # Both URLs can already exist in SQLite (e.g. a shifted G
-            # column). Match the visible title against the authoritative
-            # article/list titles before using the G-column fallback.
-            visible = clean_title(title).casefold()
-            title_matches = {
-                url for url, n in cached.items()
-                if visible and visible in {
-                    clean_title(n['title']).casefold(),
-                    clean_title(n['article_title']).casefold()
-                }
+        visible = clean_title(title).casefold()
+        title_matches = {
+            url for url, n in cached.items()
+            if visible and visible in {
+                clean_title(n['title']).casefold(),
+                clean_title(n['article_title']).casefold()
             }
-            if len(title_matches) == 1:
-                choice = next(iter(title_matches))
-            elif a_url in cached and g_url not in cached:
-                choice = a_url
-        LOG.warning('A列超链接与G列原文链接冲突，统一为：%s', choice)
+        }
+        if len(title_matches) == 1:
+            choice = next(iter(title_matches))
+            LOG.warning('第%s行A/G冲突，依据唯一标题匹配修复为：%s', a.row, choice)
+        else:
+            if conflicts is not None:
+                conflicts.append({
+                    'row': a.row, 'title': title, 'a_url': a_url,
+                    'g_url': g_url, 'reason': '缓存中无唯一的新闻标题对应关系'
+                })
+            LOG.error('第%s行A/G链接冲突尚未解决，请人工核对：A=%s；G=%s',
+                      a.row, a_url, g_url)
+            return ''
     if a.data_type == 'f' and title:
         a.value = title
     if not a.hyperlink or a.hyperlink.target != choice:
@@ -745,14 +748,21 @@ def open_book(path: Path):
     return book
 
 
-def existing_rows(book, con: sqlite3.Connection) -> dict[str, set[str]]:
+def existing_rows(book, con: sqlite3.Connection,
+                  conflicts: list[dict] | None = None) -> dict[str, set[str]]:
     urls = {source: set() for source in SOURCES}
     for source, info in SOURCES.items():
         ws = book[info['sheet']]
         for idx in range(2, ws.max_row + 1):
             row = [ws.cell(idx, j) for j in range(1, 9)]
-            url = reconcile_row_link(row, info['base'], con, source)
+            url = reconcile_row_link(row, info['base'], con, source, conflicts)
             if not url:
+                # Keep both candidates in the known set so a re-crawl does
+                # not duplicate an existing row awaiting manual verification.
+                candidate_a = canonical_news_url(info['base'], get_cell_url(row[0]))
+                candidate_g = canonical_news_url(info['base'], row[6].value)
+                if candidate_a and candidate_g and candidate_a != candidate_g:
+                    urls[source].update((candidate_a, candidate_g))
                 continue
             if url in urls[source]:
                 continue
@@ -1410,6 +1420,34 @@ def show_excel_audit(path: Path) -> int:
     return 1 if report['issue_count'] else 0
 
 
+def write_link_review_report(conflicts: list[dict], path: Path) -> None:
+    """Write one replaceable UTF-8 CSV without changing any Excel cells."""
+    if not conflicts:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+            mode='w', prefix='.link-review-', suffix='.csv',
+            encoding='utf-8-sig', newline='', dir=path.parent,
+            delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            writer = csv.writer(handle)
+            writer.writerow(['Excel行号', '新闻标题', 'A列实际超链接',
+                             'G列原文链接', '需人工复核的原因'])
+            for issue in conflicts:
+                writer.writerow([issue['row'], issue['title'],
+                                 issue['a_url'], issue['g_url'], issue['reason']])
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    LOG.warning('有%d行原文链接冲突未能安全修复，详见：%s', len(conflicts), path)
+
+
 def backup_spreadsheet(path: Path) -> None:
     """Keep one pre-run snapshot per day and only seven automatic Excel backups.
 
@@ -1601,7 +1639,9 @@ def main(argv=None, *, base_dir: Path | None = None) -> int:
     backup_spreadsheet(excel)
     book = open_book(excel)
     with connect_db(database) as con:
-        existing = existing_rows(book, con)
+        link_conflicts = []
+        existing = existing_rows(book, con, link_conflicts)
+        write_link_review_report(link_conflicts, results / '链接冲突待复核.csv')
         session = build_session(cfg['user_agent'])
         new = {source: [] for source in SOURCES}
         if mode != 'export':
