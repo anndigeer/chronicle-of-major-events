@@ -1063,7 +1063,8 @@ class TestJjxw(unittest.TestCase):
             ws['A2'].hyperlink = a_url
             ws['G2'] = g_url
             wb.save(output / 'jiujiang_news.xlsx')
-            with patch.object(j, 'fetch_article_details'):
+            with patch.object(j, 'fetch_article_details'), \
+                 patch.object(j, 'crawl', return_value={'jjxw': []}):
                 code = j.main(['2026-09', '--sync'], base_dir=root)
             self.assertEqual(code, 1)
             self.assertTrue((output / '链接冲突待复核.csv').is_file())
