@@ -1455,7 +1455,12 @@ def write_link_review_report(conflicts: list[dict], path: Path) -> None:
             writer.writerow(['Excel行号', '新闻标题', 'A列实际超链接',
                              'G列原文链接', '需人工复核的原因'])
             for issue in conflicts:
-                writer.writerow([issue['row'], issue['title'],
+                # Titles are untrusted web text; do not let Excel interpret
+                # a leading formula prefix when opening this CSV.
+                title = str(issue['title'])
+                if title.lstrip().startswith(('=', '+', '-', '@')):
+                    title = "'" + title
+                writer.writerow([issue['row'], title,
                                  issue['a_url'], issue['g_url'], issue['reason']])
         except BaseException:
             temporary.unlink(missing_ok=True)
@@ -1539,6 +1544,8 @@ def verify_month_output(month: str, excel: Path, output_dir: Path, grace_days: i
             report['errors'].append(f'Excel读取失败：{exc}')
     if not report['news']:
         report['errors'].append('没有新闻网新闻')
+    if (output_dir / '链接冲突待复核.csv').is_file():
+        report['errors'].append('仍有链接冲突待人工复核，请检查results/链接冲突待复核.csv')
     year, month_number = map(int, month.split('-'))
     words = list(output_dir.glob(
         f'市委大事记（{year}年{month_number}月）*.docx')) if output_dir.exists() else []
