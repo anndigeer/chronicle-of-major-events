@@ -1072,6 +1072,40 @@ class TestJjxw(unittest.TestCase):
             self.assertEqual(actual.active['A2'].hyperlink.target, a_url)
             self.assertEqual(actual.active['G2'].value, g_url)
 
+    def test_link_conflict_csv_formula_safe(self):
+        import csv
+        with tempfile.TemporaryDirectory() as folder:
+            out = Path(folder) / '链接冲突待复核.csv'
+            j.write_link_review_report([{
+                'row': 2, 'title': '=HYPERLINK("https://example.com","恶意")',
+                'a_url': 'https://www.jjxw.cn/article/100.html',
+                'g_url': 'https://www.jjxw.cn/article/200.html',
+                'reason': '待人工确认'}], out)
+            with out.open(encoding='utf-8-sig', newline='') as file:
+                rows = list(csv.reader(file))
+            self.assertTrue(rows[1][1].startswith("'=HYPERLINK("))
+
+    def test_verify_detects_pending_link_review_report(self):
+        with tempfile.TemporaryDirectory() as folder:
+            out = Path(folder)
+            wb = j.open_book(out / 'jiujiang_news.xlsx')
+            ws = wb.active
+            url = 'https://www.jjxw.cn/article/2026/09/18/101.html'
+            ws['A2'] = '新闻'
+            ws['A2'].hyperlink = url
+            ws['B2'] = '2026-09-18'
+            ws['G2'] = url
+            wb.save(out / 'jiujiang_news.xlsx')
+            j.write_link_review_report([{
+                'row': 3, 'title': '另一篇待审报道',
+                'a_url': url, 'g_url': url, 'reason': '待审'}],
+                out / '链接冲突待复核.csv')
+            self.assertEqual(j.verify_month_output(
+                '2026-09', out / 'jiujiang_news.xlsx', out), 1)
+            report = json.loads((out / '抓取检查报告.json').read_text('utf-8'))
+            self.assertTrue(any('链接冲突' in message
+                                for message in report['errors']))
+
     def test_formula_hyperlink_migrates_to_native_and_keeps_color(self):
         with tempfile.TemporaryDirectory() as folder:
             p = Path(folder)
