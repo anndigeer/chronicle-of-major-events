@@ -866,38 +866,53 @@ EVENT_ACTION = re.compile(
 EVENT_DATE = re.compile(
     r'(?:(?P<year>20\d{2})年)?(?P<month>1[0-2]|0?[1-9])月'
     r'(?P<day>3[01]|[12]\d|0?[1-9])日|'
-    r'(?P<relative>昨日|昨天)'
+    r'(?P<relative_month>本月|上月)(?P<relative_day>3[01]|[12]\d|0?[1-9])日|'
+    r'(?P<relative>昨日|昨天|前日|前天)'
 )
 
 
 def infer_event_date(title: str, paragraphs: list[str], publication: str,
                      max_lag: int = 10) -> str:
-    """Infer only a strong, near-publication event-date statement.
-
-    Avoid treating a historical reference, future schedule, or a bare month
-    mention as the actual event date. Uncertain articles remain reviewable.
-    """
+    """Conservatively infer event dates without mistaking a report date for one."""
     published = date.fromisoformat(publication)
-    # Event leads are usually in the title or first two paragraphs.
     for text in [title, *paragraphs[:2]]:
         lead = norm_space(text)[:280]
         for match in EVENT_DATE.finditer(lead):
-            if re.search(r'将于|计划于|预计于|拟于', lead[max(0, match.start() - 4):match.start()]):
+            before = lead[max(0, match.start() - 8):match.start()]
+            if re.search(r'将于|计划于|预计于|拟于', before):
+                continue
+            # A statistics cutoff is not an event's date, even when a
+            # subsequent clause describes meetings or inspections.
+            if re.search(r'(?:截至|截止(?:到)?|统计至)\s*$', before):
                 continue
             context = lead[match.end():match.end() + 70].split('。', 1)[0]
+            # "10月2日记者获悉，9月30日召开会议" means September 30,
+            # not October 2. Each candidate can only use words occurring
+            # before the *next* full event-date expression.
+            next_date = EVENT_DATE.search(context)
+            if next_date:
+                context = context[:next_date.start()]
             action = EVENT_ACTION.search(context)
             if not action:
                 continue
-            # "将举行" and "拟召开" are future plans, not events that happened.
-            if re.search(r'预计|计划|拟于|将于|即将|将|拟', context[:action.end()]):
+            if re.search(r'预计|计划|拟于|将于|即将|将|拟',
+                         context[:action.end()]):
                 continue
             if match.group('relative'):
-                happened = published - timedelta(days=1)
+                lag = 2 if match.group('relative') in {'前日', '前天'} else 1
+                happened = published - timedelta(days=lag)
             else:
                 year = int(match.group('year') or published.year)
-                mm, dd = int(match.group('month')), int(match.group('day'))
-                if not match.group('year') and published.month == 1 and mm == 12:
-                    year -= 1
+                if match.group('relative_month'):
+                    month_start = published.replace(day=1)
+                    if match.group('relative_month') == '上月':
+                        month_start -= timedelta(days=1)
+                    year, mm = month_start.year, month_start.month
+                    dd = int(match.group('relative_day'))
+                else:
+                    mm, dd = int(match.group('month')), int(match.group('day'))
+                    if not match.group('year') and published.month == 1 and mm == 12:
+                        year -= 1
                 try:
                     happened = date(year, mm, dd)
                 except ValueError:
