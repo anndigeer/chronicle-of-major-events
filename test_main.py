@@ -989,6 +989,95 @@ class TestJjxw(unittest.TestCase):
                                  'jiujiang_news_运行前_*.xlsx')})
             self.assertTrue(all(item.exists() for item in copies))
 
+    def test_excel_audit_reports_months_without_mutating_workbook(self):
+        import io
+        from contextlib import redirect_stdout
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            output = root / 'results'
+            output.mkdir()
+            path = output / 'jiujiang_news.xlsx'
+            ws = j.open_book(path).active
+            base = 'https://www.jjxw.cn/article'
+            for index, (day, ident) in enumerate([
+                ('2026-09-18', 10001), ('2026-09-30', 10002),
+                ('2026-10-02', 10003)], 2):
+                url = f'{base}/2026/{day[5:7]}/{day[8:10]}/{ident}.html'
+                ws.cell(index, 1, f'报道{ident}').hyperlink = url
+                ws.cell(index, 2, day)
+                ws.cell(index, 7, url)
+            j.save_book_atomic(ws.parent, path)
+            original = path.read_bytes()
+            audit = j.audit_excel(path)
+            self.assertEqual(audit['total'], 3)
+            self.assertEqual(audit['months'], {'2026-09': 2, '2026-10': 1})
+            self.assertEqual(audit['issue_count'], 0)
+            with patch.object(j, 'fetch_html',
+                              side_effect=AssertionError('network forbidden')), \
+                 patch.object(j, 'connect_db',
+                              side_effect=AssertionError('database forbidden')):
+                output_text = io.StringIO()
+                with redirect_stdout(output_text):
+                    result = j.main(['--check-excel'], base_dir=root)
+            self.assertEqual(result, 0)
+            self.assertIn('2026-09：2 条', output_text.getvalue())
+            self.assertIn('2026-10：1 条', output_text.getvalue())
+            self.assertEqual(path.read_bytes(), original)
+            self.assertFalse((output / 'jiujiang_cache.sqlite3').exists())
+
+    def test_excel_audit_detects_mismatched_links_duplicates_and_dates(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'jiujiang_news.xlsx'
+            wb = j.open_book(path)
+            ws = wb.active
+            url1 = 'https://www.jjxw.cn/article/2026/09/18/30001.html'
+            url2 = 'https://www.jjxw.cn/article/2026/09/19/30002.html'
+            ws.cell(2, 1, '报道一').hyperlink = url1
+            ws.cell(2, 2, '2026-09-18')
+            ws.cell(2, 7, url2)  # valid but conflicting
+            ws.cell(3, 1, '报道二').hyperlink = url2
+            ws.cell(3, 2, '2026-09-19')
+            ws.cell(3, 7, url2)  # duplicate original URL
+            ws.cell(4, 1, '报道三').hyperlink = url1
+            ws.cell(4, 2, 'bad date')
+            ws.cell(4, 9, '2026-09-31')
+            wb.save(path)
+            audit = j.audit_excel(path)
+            self.assertGreaterEqual(audit['issue_count'], 5)
+            details = '\n'.join(audit['issues'])
+            self.assertIn('A/G链接不一致', details)
+            self.assertIn('第3行', details)
+            self.assertIn('G列原文链接无效', details)
+            self.assertIn('B列发布日期', details)
+            self.assertIn('I列事件日期', details)
+            self.assertEqual(j.show_excel_audit(path), 1)
+
+    def test_check_excel_missing_workbook_is_read_only(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.assertEqual(j.main(['--check-excel'], base_dir=root), 1)
+            self.assertFalse((root / 'results').exists())
+
+    def test_generated_word_backup_caps_seven_and_preserves_manual_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            path = root / '市委大事记（2026年9月）.docx'
+            Document().save(path)
+            backup_dir = root / '备份'
+            backup_dir.mkdir()
+            prefix = path.stem + '_'
+            for day in range(1, 13):
+                (backup_dir / f'{prefix}202509{day:02d}_121200.docx').write_bytes(b'old')
+            manual = backup_dir / '我的手工修订终稿.docx'
+            manual.write_bytes(b'keep forever')
+            j.backup_generated_word(path)
+            generated = list(backup_dir.glob(prefix + '*.docx'))
+            self.assertEqual(len(generated), 7)
+            names = {f.name for f in generated}
+            j.backup_generated_word(path)
+            self.assertEqual(names, {f.name for f in backup_dir.glob(prefix + '*.docx')})
+            self.assertEqual(manual.read_bytes(), b'keep forever')
+
     def test_news_json_api(self):
         obj = {'data': {'list': [
             {'fileID': 190001, 'publishTime': '2026-09-18 10:00:00',

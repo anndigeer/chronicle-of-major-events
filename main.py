@@ -1208,6 +1208,31 @@ def add_run(p, text: str, font: str):
     return r
 
 
+def backup_generated_word(path: Path) -> None:
+    """At most one generated Word backup per day; retain last seven.
+
+    Matches only timestamped backups created by the program and never
+    deletes a manually named document.
+    """
+    directory = path.parent / '备份'
+    directory.mkdir(parents=True, exist_ok=True)
+    prefix = f'{path.stem}_'
+    generated = re.compile(
+        re.escape(prefix) + r'\d{8}_\d{6}(?:_\d{6})?\.docx')
+    previous = sorted(
+        (item for item in directory.glob(f'{prefix}*.docx')
+         if item.is_file() and generated.fullmatch(item.name)),
+        key=lambda x: x.name)
+    today = prefix + datetime.now().strftime('%Y%m%d') + '_'
+    if not any(item.name.startswith(today) for item in previous):
+        stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        snapshot = directory / f'{prefix}{stamp}.docx'
+        shutil.copy2(path, snapshot)
+        previous.append(snapshot)
+    for stale in sorted(previous, key=lambda x: x.name)[:-7]:
+        stale.unlink()
+
+
 def build_word(month: str, articles: list[dict], out_dir: Path) -> Path | None:
     if not articles:
         return None
@@ -1219,10 +1244,7 @@ def build_word(month: str, articles: list[dict], out_dir: Path) -> Path | None:
         if 'jrjj-v2-generated' not in (existing.core_properties.keywords or ''):
             path = out_dir / f'市委大事记（{y}年{m}月）_自动整理.docx'
         if path.exists():
-            backups = out_dir / '备份'
-            backups.mkdir(exist_ok=True)
-            stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            shutil.copy2(path, backups / f'{path.stem}_{stamp}.docx')
+            backup_generated_word(path)
     doc = Document()
     set_page_layout(doc)
     doc.core_properties.keywords = 'jrjj-v2-generated'
@@ -1276,6 +1298,102 @@ def build_word(month: str, articles: list[dict], out_dir: Path) -> Path | None:
     doc.save(temp)
     temp.replace(path)
     return path
+
+
+def audit_excel(path: Path) -> dict:
+    """Read-only audit of the cumulative worksheet and article hyperlinks.
+
+    Checks the true A hyperlink destination, independent G original URL,
+    duplicate links and calendar dates. Does not write a repaired workbook.
+    """
+    result = {
+        'file': str(path), 'sheet': '九江新闻网', 'total': 0,
+        'months': {}, 'issues': [], 'issue_count': 0,
+    }
+    if not path.is_file():
+        result['issues'].append('找不到Excel：' + str(path))
+        result['issue_count'] += 1
+        return result
+    try:
+        book = load_workbook(path, read_only=False, data_only=False)
+    except Exception as exc:
+        result['issues'].append(f'Excel无法读取：{exc}')
+        result['issue_count'] += 1
+        return result
+
+    def problem(message):
+        result['issue_count'] += 1
+        if len(result['issues']) < 30:
+            result['issues'].append(message)
+
+    try:
+        if book.sheetnames != ['九江新闻网']:
+            problem('工作表不是唯一的“九江新闻网”：' + '、'.join(book.sheetnames))
+        if '九江新闻网' not in book.sheetnames:
+            return result
+        ws = book['九江新闻网']
+        seen = {}
+        base = SOURCES['jjxw']['base']
+        for rowno in range(2, ws.max_row + 1):
+            a, b, g, event = (ws.cell(rowno, n) for n in (1, 2, 7, 9))
+            if not (a.value or b.value or g.value):
+                continue
+            result['total'] += 1
+            title = get_cell_title(a)
+            if not title:
+                problem(f'第{rowno}行：A列缺少新闻标题')
+            aurl = canonical_news_url(base, get_cell_url(a))
+            gurl = canonical_news_url(base, g.value)
+            if not aurl:
+                problem(f'第{rowno}行：A列标题没有有效的原文超链接')
+            if not gurl:
+                problem(f'第{rowno}行：G列原文链接无效或为空')
+            if aurl and gurl and aurl != gurl:
+                problem(f'第{rowno}行：A/G链接不一致；A={aurl}；G={gurl}')
+            canonical = gurl or aurl
+            if canonical:
+                if canonical in seen:
+                    problem(f'第{rowno}行：原文链接与第{seen[canonical]}行重复：{canonical}')
+                else:
+                    seen[canonical] = rowno
+            if isinstance(b.value, (date, datetime)):
+                published = b.value.date().isoformat() if isinstance(b.value, datetime) else b.value.isoformat()
+            else:
+                published = date_from_text(str(b.value or ''))
+            if not published:
+                problem(f'第{rowno}行：B列发布日期缺失或无效')
+            else:
+                month = published[:7]
+                result['months'][month] = result['months'].get(month, 0) + 1
+            if event.value not in (None, ''):
+                if isinstance(event.value, (date, datetime)):
+                    event_day = event.value.date().isoformat() if isinstance(event.value, datetime) else event.value.isoformat()
+                else:
+                    event_day = date_from_text(str(event.value))
+                if not event_day:
+                    problem(f'第{rowno}行：I列事件日期无效：{event.value}')
+    finally:
+        book.close()
+    result['months'] = dict(sorted(result['months'].items()))
+    return result
+
+
+def show_excel_audit(path: Path) -> int:
+    """Display cumulative monthly counts and anomalies without changing files."""
+    report = audit_excel(path)
+    print(f'检查文件：{path}')
+    print(f'累计新闻：{report["total"]} 条')
+    print('按发布日期统计：')
+    for month, count in report['months'].items():
+        print(f'  {month}：{count} 条')
+    if not report['months']:
+        print('  暂无有效发布日期记录')
+    print(f'异常：{report["issue_count"]} 项')
+    for problem in report['issues']:
+        print('  - ' + problem)
+    if report['issue_count'] > len(report['issues']):
+        print(f'  ...还有{report["issue_count"] - len(report["issues"])}项未显示')
+    return 1 if report['issue_count'] else 0
 
 
 def backup_spreadsheet(path: Path) -> None:
@@ -1385,6 +1503,8 @@ def args_parser():
                            help='运行离线测试，不联网也不创建采集文件')
     operation.add_argument('--check-names', action='store_true',
                            help='离线检查生效的人名数量与完整名单，不访问新闻网站')
+    operation.add_argument('--check-excel', action='store_true',
+                           help='离线检查累计Excel各月数量、A/G超链接、重复新闻及日期')
     operation.add_argument('--update-leaders', action='store_true',
                            help='联网更新省委、人大、政府、政协领导名单至names.auto.txt')
     operation.add_argument('--sync', action='store_true',
@@ -1419,6 +1539,8 @@ def main(argv=None, *, base_dir: Path | None = None) -> int:
         print('合计去重人数：' +
               str(len({name for vals in groups.values() for name in vals})))
         return 0
+    if args.check_excel:
+        return show_excel_audit(root / 'results' / 'jiujiang_news.xlsx')
     if args.check_names:
         # Read-only: no network, no SQLite/Excel outputs or config creation.
         cfg = load_config(root / 'config.json', create_missing=False)
