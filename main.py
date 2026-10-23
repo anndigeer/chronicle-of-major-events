@@ -649,6 +649,51 @@ def selection(row) -> str:
     return 'auto'
 
 
+def canonical_news_url(base: str, href: object) -> str:
+    """Normalize article URLs and reject other domains and non-news links."""
+    raw = str(href or '').strip()
+    if not raw:
+        return ''
+    url = normalize_url(base, raw)
+    parts = urlsplit(url)
+    if parts.hostname not in {'www.jjxw.cn', 'jjxw.cn'}:
+        return ''
+    if not parts.path.lower().endswith(('.html', '.htm')):
+        return ''
+    return url
+
+
+def reconcile_row_link(row, base: str, con: sqlite3.Connection | None = None,
+                       source: str = 'jjxw') -> str:
+    """Make A hyperlink target and G URL identical, preserving human edits.
+
+    When A/G conflict, prefer the link present in the database. Otherwise,
+    prefer the validated G value (the designated original-link column).
+    """
+    a, g = row[0], row[6]
+    a_url = canonical_news_url(base, get_cell_url(a))
+    g_url = canonical_news_url(base, g.value)
+    if not (a_url or g_url):
+        return ''
+    choice = g_url or a_url
+    if a_url and g_url and a_url != g_url:
+        if con is not None:
+            db_urls = {n['url'] for n in con.execute(
+                'SELECT url FROM news WHERE source=? AND url IN (?,?)',
+                (source, a_url, g_url))}
+            if a_url in db_urls and g_url not in db_urls:
+                choice = a_url
+        LOG.warning('A列超链接与G列原文链接冲突，统一为：%s', choice)
+    title = get_cell_title(a)
+    if a.data_type == 'f' and title:
+        a.value = title
+    if not a.hyperlink or a.hyperlink.target != choice:
+        a.hyperlink = choice
+    if g.value != choice:
+        g.value = choice
+    return choice
+
+
 def open_book(path: Path):
     """One worksheet only; main() backs up the original workbook first."""
     if path.exists():
@@ -692,10 +737,9 @@ def existing_rows(book, con: sqlite3.Connection) -> dict[str, set[str]]:
         ws = book[info['sheet']]
         for idx in range(2, ws.max_row + 1):
             row = [ws.cell(idx, j) for j in range(1, 9)]
-            url = get_cell_url(row[0], row[6].value)
+            url = reconcile_row_link(row, info['base'], con, source)
             if not url:
                 continue
-            url = normalize_url(info['base'], url)
             if url in urls[source]:
                 continue
             urls[source].add(url)
@@ -739,24 +783,46 @@ def save_book_atomic(book, path: Path) -> None:
 
 
 def write_new_rows(book, records: dict[str, list[News]]):
+    """Append newly published articles to one lifelong worksheet.
+
+    Insertion into row 2 used to shift existing hyperlinks/comments/styles.
+    Appending keeps all existing row positions stable for manual review.
+    Column B's date filter can be used to sort/view individual months.
+    """
     for source, news in records.items():
         if not news:
             continue
         ws = book[SOURCES[source]['sheet']]
-        new_items = sorted(news, key=lambda x: (x.pub_date, x.title), reverse=True)
-        ws.insert_rows(2, len(new_items))
-        for ix, item in enumerate(new_items, 2):
-            a = ws.cell(ix, 1, item.title)
-            a.hyperlink = item.url
+        base = SOURCES[source]['base']
+        known = set()
+        for idx in range(2, ws.max_row + 1):
+            a = ws.cell(idx, 1)
+            g = ws.cell(idx, 7)
+            link = canonical_news_url(base, g.value) or canonical_news_url(
+                base, get_cell_url(a))
+            if link:
+                known.add(link)
+        added = 0
+        for item in sorted(news, key=lambda n: (n.pub_date, n.title)):
+            url = canonical_news_url(base, item.url)
+            if not url or url in known:
+                continue
+            known.add(url)
+            added += 1
+            idx = ws.max_row + 1
+            a = ws.cell(idx, 1, item.title)
+            a.hyperlink = url
             a.font = Font(name='楷体_GB2312', size=12, color='1565C0', underline='single')
             a.alignment = Alignment(vertical='center', wrap_text=True)
-            b = ws.cell(ix, 2, item.pub_date)
+            b = ws.cell(idx, 2, item.pub_date)
             b.font = Font(name='微软雅黑', size=11)
             b.alignment = Alignment(horizontal='center', vertical='center')
-            ws.cell(ix, 7, item.url)
-            ws.row_dimensions[ix].height = 28
+            ws.cell(idx, 7, url)
+            ws.row_dimensions[idx].height = 28
         ws.auto_filter.ref = f'A1:I{ws.max_row}'
-        LOG.info('%s：新增 %d 条', SOURCES[source]['sheet'], len(new_items))
+        LOG.info('%s：按发布日期增量累计新增 %d 条（保留所有原有行）',
+                 SOURCES[source]['sheet'], added)
+
 
 
 def publication_window(month: str, grace_days: int = 10) -> tuple[str, str]:
@@ -885,9 +951,9 @@ def fetch_article_details(session: requests.Session, con: sqlite3.Connection,
     fresh_urls = {x.url for x in new[source]}
     manual_urls = set()
     for row in book[SOURCES[source]['sheet']].iter_rows(min_row=2, max_col=8):
-        url = get_cell_url(row[0], row[6].value)
+        url = reconcile_row_link(row, SOURCES[source]['base'], con, source)
         if selection(row) == 'include' and url:
-            manual_urls.add(normalize_url(SOURCES[source]['base'], url))
+            manual_urls.add(url)
     # Query by full date range so December news published in January is included.
     start, end = publication_window(month, cfg['late_publication_days'])
     rows = con.execute(
@@ -964,10 +1030,9 @@ def refresh_book(book, con: sqlite3.Connection, names: list[str], cfg: dict) -> 
         ws = book[SOURCES[source]['sheet']]
         for i in range(2, ws.max_row + 1):
             row = [ws.cell(i, k) for k in range(1, 10)]
-            url = get_cell_url(row[0], row[6].value)
+            url = reconcile_row_link(row, SOURCES[source]['base'], con, source)
             if not url:
                 continue
-            url = normalize_url(SOURCES[source]['base'], url)
             n = con.execute('SELECT * FROM news WHERE url=? AND source=?', (url, source)).fetchone()
             if n is None:
                 continue
@@ -1214,14 +1279,260 @@ def build_word(month: str, articles: list[dict], out_dir: Path) -> Path | None:
 
 
 def backup_spreadsheet(path: Path) -> None:
+    """Back up at most once per day; keep the newest seven auto snapshots.
+
+    Only this program's timestamped _运行前_ files are pruned. Manual files
+    and unrelated XLSX documents are not touched.
+    """
     if not path.exists():
         return
     backups = path.parent / '备份'
     backups.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-    backup = backups / f'{path.stem}_运行前_{stamp}{path.suffix}'
-    shutil.copy2(path, backup)
-    LOG.info('已备份现有Excel：%s', backup)
+    prefix = f'{path.stem}_运行前_'
+    pattern = re.compile(
+        rf'^{re.escape(prefix)}\d{{8}}_\d{{6}}_\d{{6}}{re.escape(path.suffix)}
+
+
+def previous_month(today: date | None = None) -> str:
+    today = today or date.today()
+    return (today.replace(day=1) - timedelta(days=1)).strftime('%Y-%m')
+
+
+def verify_month_output(month: str, excel: Path, output_dir: Path, grace_days: int = 10) -> int:
+    """Verify monthly output without network or database writes."""
+    start, end = publication_window(month, grace_days)
+    report = {
+        'month': month, 'source': '九江新闻网', 'news': 0,
+        'matched': 0, 'late_candidates': 0, 'late_confirmed': 0,
+        'word_articles': 0, 'errors': [],
+    }
+    if not excel.exists():
+        report['errors'].append('缺少Excel文件')
+    else:
+        try:
+            book = load_workbook(excel, read_only=True)
+            try:
+                if book.sheetnames != ['九江新闻网']:
+                    report['errors'].append('Excel必须只有九江新闻网工作表')
+                else:
+                    for row in book.active.iter_rows(min_row=2, max_col=9,
+                                                     values_only=True):
+                        if not row[0]:
+                            continue
+                        pub = str(row[1] or '')
+                        if not start <= pub <= end:
+                            continue  # Existing workbook can also contain other months.
+                        report['news'] += 1
+                        if not pub.startswith(month):
+                            report['late_candidates'] += 1
+                            if str(row[8] or '').startswith(month):
+                                report['late_confirmed'] += 1
+                        if row[2] == '命中':
+                            report['matched'] += 1
+            finally:
+                book.close()
+        except Exception as exc:
+            report['errors'].append(f'Excel读取失败：{exc}')
+    if not report['news']:
+        report['errors'].append('没有新闻网新闻')
+    year, month_number = map(int, month.split('-'))
+    words = list(output_dir.glob(
+        f'市委大事记（{year}年{month_number}月）*.docx')) if output_dir.exists() else []
+    if not words:
+        report['errors'].append('没有生成指定月份Word')
+    for path in words:
+        try:
+            doc = Document(path)
+            report['word_articles'] += sum(
+                bool(p._p.xpath('./w:pPr/w:outlineLvl')) for p in doc.paragraphs)
+        except Exception as exc:
+            report['errors'].append(f'Word读取失败：{path.name} — {exc}')
+    if not report['word_articles']:
+        report['errors'].append('Word没有新闻正文')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / '抓取检查报告.json').write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+    LOG.info('导出验证：%s', json.dumps(report, ensure_ascii=False))
+    return 1 if report['errors'] else 0
+
+
+def args_parser():
+    """Keep the user-facing CLI small; tuning lives in config.json."""
+    parser = argparse.ArgumentParser(
+        description='九江新闻网市委大事记：默认采集上个月，Excel/Word保存到results目录',
+        epilog=('示例：python main.py | python main.py 2026-09 | '
+                'python main.py --test | python main.py 2026-09 --export'))
+    parser.add_argument(
+        'month', nargs='?', metavar='YYYY-MM',
+        help='目标月份，默认上一个自然月，如 2026-09')
+    operation = parser.add_mutually_exclusive_group()
+    operation.add_argument('--test', action='store_true',
+                           help='运行离线测试，不联网也不创建采集文件')
+    operation.add_argument('--check-names', action='store_true',
+                           help='离线检查生效的人名数量与完整名单，不访问新闻网站')
+    operation.add_argument('--update-leaders', action='store_true',
+                           help='联网更新省委、人大、政府、政协领导名单至names.auto.txt')
+    operation.add_argument('--sync', action='store_true',
+                           help='只同步新闻到Excel和正文缓存，不生成Word')
+    operation.add_argument('--export', action='store_true',
+                           help='根据现有Excel与缓存重新生成Word，可补抓缺失正文')
+    operation.add_argument('--verify', action='store_true',
+                           help='离线检查指定月份的Excel和Word是否完整')
+    return parser
+
+
+def main(argv=None, *, base_dir: Path | None = None) -> int:
+    args = args_parser().parse_args(argv)
+    # Resolve paths relative to this script, not the terminal's current directory.
+    # base_dir is an internal test seam, not an extra command-line option.
+    root = Path(base_dir) if base_dir is not None else Path(__file__).resolve().parent
+    if args.test:
+        import subprocess
+        return subprocess.call(
+            [sys.executable, '-m', 'unittest', '-v', 'test_main'], cwd=root)
+    if args.update_leaders:
+        # Separate workflow from news collection; errors retain the old file.
+        try:
+            groups, updated = update_leaders(root)
+        except Exception as exc:
+            print(f'领导名单更新失败：{exc}', file=sys.stderr)
+            return 1
+        for section, people in groups.items():
+            print(f'{section}：{len(people)} 人 — ' + '、'.join(people))
+        print(f'已保存至 {root / AUTO_NAMES_FILE}' if updated
+              else '名单未变化，无需覆盖已有文件')
+        print('合计去重人数：' +
+              str(len({name for vals in groups.values() for name in vals})))
+        return 0
+    if args.check_names:
+        # Read-only: no network, no SQLite/Excel outputs or config creation.
+        cfg = load_config(root / 'config.json', create_missing=False)
+        names = get_names(cfg)
+        print(f'姓名来源：{cfg["names_source"]}')
+        print(f'生效姓名：{len(names)} 人')
+        snapshot = root / AUTO_NAMES_FILE
+        if (snapshot.is_file() and
+                '初始网页快照' in snapshot.read_text(encoding='utf-8-sig').splitlines()[0]):
+            print('提醒：当前 names.auto.txt 为网页缓存快照，尚未通过实时抓取复核。')
+        for i, name in enumerate(names, 1):
+            print(f'{i:>2}. {name}')
+        overlaps = [(short, long) for short in names for long in names
+                    if short != long and short in long]
+        if overlaps:
+            print('注意：名单中存在姓名包含关系；若短姓名只出现在长姓名内部，'
+                  '不会单独计为命中：')
+            for short, long in overlaps:
+                print(f'  {short} ⊂ {long}')
+        return 0
+
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s',
+                        datefmt='%H:%M:%S')
+    month = args.month or previous_month()
+    if not re.fullmatch(r'20\d{2}-(0[1-9]|1[0-2])', month):
+        args_parser().error('月份格式错误，请输入 YYYY-MM，例如 2026-09')
+
+    results = root / 'results'
+    excel = results / 'jiujiang_news.xlsx'
+    database = results / 'jiujiang_cache.sqlite3'
+    debug_dir = results / 'debug_html'
+
+    if args.verify:
+        return verify_month_output(month, excel, results, load_config(root / 'config.json')['late_publication_days'])
+
+    mode = 'sync' if args.sync else 'export' if args.export else 'all'
+    cfg = load_config(root / 'config.json')
+    year = int(month[:4])
+    results.mkdir(parents=True, exist_ok=True)
+
+    LOG.info('目标月份：%s；延后%d天检索；发布日期范围：%s 至 %s；模式：%s；输出目录：%s',
+             month, cfg['late_publication_days'],
+             *publication_window(month, cfg['late_publication_days']), mode, results)
+    backup_spreadsheet(excel)
+    book = open_book(excel)
+    with connect_db(database) as con:
+        existing = existing_rows(book, con)
+        session = build_session(cfg['user_agent'])
+        new = {source: [] for source in SOURCES}
+        if mode != 'export':
+            # Scan the complete month + grace window, then preserve pages even
+            # if a later API request fails. Do not issue a misleading Word.
+            crawl_status = {}
+            new = crawl(session, con, existing, cfg, year, debug_dir, month,
+                        status=crawl_status)
+            write_new_rows(book, new)
+            save_book_atomic(book, excel)
+            if crawl_status.get('complete') is False:
+                LOG.error('本次采集不完整：%s。已保存Excel和缓存，请稍后重试。',
+                          crawl_status.get('error', '未知分页错误'))
+                return 1
+            fetch_article_details(session, con, cfg, year, month, new, book, 'month')
+        else:
+            # Reuse cached news and honor manual selection in column E.
+            fetch_article_details(session, con, cfg, year, month, new, book, 'month')
+
+        names = get_names(cfg)
+        selected = refresh_book(book, con, names, cfg)
+        save_book_atomic(book, excel)
+        LOG.info('Excel已更新：%s；配置姓名 %d 人', excel, len(names))
+        if mode != 'sync':
+            chosen, failed = deduplicate_for_month(selected, month)
+            word = build_word(month, chosen, results)
+            if word:
+                LOG.info('Word已生成：%s（%d篇，正文去重）', word, len(chosen))
+            else:
+                LOG.error('该月份没有成功提取并满足筛选条件的正文，未生成Word；请检查日期、名单和采集日志')
+            if failed:
+                LOG.error('有%d篇已选新闻正文未抓取成功，Word可能缺少文章；下次将重试', len(failed))
+            if not word or failed:
+                return 1  # Do not report a complete monthly export.
+    LOG.info('完成。输出文件位于：%s', results)
+    return 0
+
+
+def configure_cli_encoding() -> None:
+    """Make Chinese terminal output safe in Windows CI and redirected consoles.
+
+    Some Windows environments default to cp1252. Setting the encoding before
+    argparse handles --help prevents UnicodeEncodeError without requiring the
+    caller to manually change the system code page.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            try:
+                stream.reconfigure(encoding='utf-8', errors='backslashreplace')
+            except (OSError, ValueError):
+                pass
+
+
+if __name__ == '__main__':
+    configure_cli_encoding()
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        LOG.error('用户中断；已落盘的缓存、Excel仍被保留')
+        sys.exit(130)
+    except PermissionError as exc:
+        LOG.error('文件被占用，请先关闭 Excel/Word 再运行：%s', exc)
+        sys.exit(2))
+    existing = sorted(
+        (item for item in backups.glob(f'{prefix}*{path.suffix}')
+         if item.is_file() and pattern.fullmatch(item.name)),
+        key=lambda item: item.name)
+    today_prefix = prefix + datetime.now().strftime('%Y%m%d') + '_'
+    if any(item.name.startswith(today_prefix) for item in existing):
+        LOG.info('当天已有Excel运行前备份，跳过重复备份')
+    else:
+        stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        dest = backups / f'{prefix}{stamp}{path.suffix}'
+        shutil.copy2(path, dest)
+        existing.append(dest)
+        LOG.info('运行前Excel备份：%s', dest)
+    for old in sorted(existing, key=lambda p: p.name)[:-7]:
+        old.unlink()
+        LOG.info('清理过期的自动Excel备份：%s', old)
+
+
+
 
 
 def previous_month(today: date | None = None) -> str:

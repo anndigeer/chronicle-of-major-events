@@ -875,6 +875,120 @@ class TestJjxw(unittest.TestCase):
                 self.assertEqual(j.main(['--check-names'], base_dir=root), 0)
             self.assertIn('尚未通过实时抓取复核', output.getvalue())
 
+    def test_hyperlink_a_and_original_url_g_are_repaired_and_stable(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            url_a = 'https://www.jjxw.cn/article/2026/09/18/918001.html'
+            url_g = 'https://www.jjxw.cn/article/2026/09/18/918002.html'
+            with j.connect_db(p / 'cache.sqlite3') as con:
+                # A was the actual article but G was accidentally shifted.
+                con.execute(
+                    "INSERT INTO news(url,source,title,pub_date) VALUES(?,?,?,?)",
+                    (url_a, 'jjxw', '陈云主持会议', '2026-09-18'))
+                wb = j.open_book(p / 'jiujiang_news.xlsx')
+                ws = wb.active
+                ws.cell(2, 1, '陈云主持会议').hyperlink = url_a
+                ws.cell(2, 2, '2026-09-18')
+                ws.cell(2, 5, '排除')
+                ws.cell(2, 7, url_g)
+                ws.cell(2, 9, '2026-09-17')
+                self.assertEqual(
+                    j.existing_rows(wb, con)['jjxw'], {url_a})
+                self.assertEqual(ws['A2'].hyperlink.target, url_a)
+                self.assertEqual(ws['G2'].value, url_a)
+                self.assertEqual(ws['E2'].value, '排除')
+                self.assertEqual(ws['I2'].value, '2026-09-17')
+                j.save_book_atomic(wb, p / 'jiujiang_news.xlsx')
+                actual = load_workbook(p / 'jiujiang_news.xlsx')
+                self.assertEqual(actual.active['A2'].hyperlink.target,
+                                 actual.active['G2'].value)
+
+    def test_hyperlink_g_wins_when_a_has_wrong_unknown_target(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            a_url = 'https://www.jjxw.cn/article/2026/09/18/111.html'
+            g_url = 'https://www.jjxw.cn/article/2026/09/18/222.html'
+            wb = j.open_book(p / 'test.xlsx')
+            ws = wb.active
+            ws.cell(2, 1, '报道标题').hyperlink = a_url
+            ws.cell(2, 7, g_url)
+            self.assertEqual(
+                j.reconcile_row_link(
+                    [ws.cell(2, i) for i in range(1, 10)],
+                    j.SOURCES['jjxw']['base']), g_url)
+            self.assertEqual(ws['A2'].hyperlink.target, g_url)
+            self.assertEqual(ws['G2'].value, g_url)
+
+    def test_formula_hyperlink_migrates_to_native_and_keeps_color(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            url = 'https://www.jjxw.cn/article/2026/09/18/222.html'
+            wb = j.open_book(p / 'test.xlsx')
+            ws = wb.active
+            ws['A2'] = f'=HYPERLINK("{url}","陈云主持会议")'
+            ws['A2'].fill = PatternFill('solid', fgColor='FFFF00')
+            ws['B2'] = '2026-09-18'
+            ws['G2'] = url
+            with j.connect_db(p / 'db.sqlite3') as con:
+                j.existing_rows(wb, con)
+            self.assertEqual(ws['A2'].value, '陈云主持会议')
+            self.assertEqual(ws['A2'].hyperlink.target, url)
+            self.assertTrue(j.is_yellow(ws['A2']))
+
+    def test_monthly_incremental_appends_without_moving_reviewed_rows(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder)
+            a = 'https://www.jjxw.cn/article/2026/09/18/1001.html'
+            b = 'https://www.jjxw.cn/article/2026/10/03/1002.html'
+            c = 'https://www.jjxw.cn/article/2026/09/30/1003.html'
+            wb = j.open_book(p / 'news.xlsx')
+            ws = wb.active
+            ws.cell(2, 1, '原有记录').hyperlink = a
+            ws.cell(2, 2, '2026-09-18')
+            ws.cell(2, 5, '收录')
+            ws.cell(2, 7, a)
+            ws.cell(2, 9, '2026-09-17')
+            ws.cell(2, 9).comment = j.Comment('手动校对', '核验')
+            news = {'jjxw': [
+                j.News('jjxw', '十月迟发报道', b, '2026-10-03'),
+                j.News('jjxw', '九月末报道', c, '2026-09-30'),
+                j.News('jjxw', '原有记录', a, '2026-09-18')
+            ]}
+            j.write_new_rows(wb, news)
+            j.write_new_rows(wb, news)
+            self.assertEqual(ws.max_row, 4)
+            self.assertEqual(ws['E2'].value, '收录')
+            self.assertEqual(ws['I2'].value, '2026-09-17')
+            self.assertEqual(ws['I2'].comment.text, '手动校对')
+            self.assertEqual(
+                [ws.cell(n, 2).value for n in (2, 3, 4)],
+                ['2026-09-18', '2026-09-30', '2026-10-03'])
+            for row in (2, 3, 4):
+                self.assertEqual(ws.cell(row, 1).hyperlink.target,
+                                 ws.cell(row, 7).value)
+            self.assertEqual(wb.sheetnames, ['九江新闻网'])
+
+    def test_daily_backup_caps_seven_and_keeps_manually_saved_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder) / 'jiujiang_news.xlsx'
+            j.save_book_atomic(j.open_book(p), p)
+            dest = p.parent / '备份'
+            dest.mkdir()
+            for day in range(1, 13):
+                (dest / f'jiujiang_news_运行前_202509{day:02d}_121200_000001.xlsx').write_bytes(b'old')
+            manual = dest / '手动整理的重要存档.xlsx'
+            manual.write_bytes(b'never delete')
+            j.backup_spreadsheet(p)
+            copies = sorted(dest.glob('jiujiang_news_运行前_*.xlsx'))
+            self.assertEqual(len(copies), 7)
+            self.assertTrue(manual.exists())
+            first_run = {item.name for item in copies}
+            j.backup_spreadsheet(p)  # same calendar day
+            self.assertEqual(first_run,
+                             {item.name for item in dest.glob(
+                                 'jiujiang_news_运行前_*.xlsx')})
+            self.assertTrue(all(item.exists() for item in copies))
+
     def test_news_json_api(self):
         obj = {'data': {'list': [
             {'fileID': 190001, 'publishTime': '2026-09-18 10:00:00',
