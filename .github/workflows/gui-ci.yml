@@ -39,6 +39,22 @@ jobs:
       - name: Run isolated CLI and GUI tests
         run: python -m unittest discover -p 'test_*.py' -v
 
+  kylin-launcher-check:
+    name: Kylin startup/diagnostics smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run standalone Kylin diagnostics regressions
+        run: python -m unittest -v test_kylin_check
+      - name: Validate Kylin POSIX launcher and user desktop entry
+        run: sh tests/kylin_shell_smoke.sh
+      - name: Generate sample MIPS readiness report (read-only)
+        run: python kylin_check.py --json
+
   chromium-gui-e2e:
     name: Chromium GUI + offline collection/export E2E
     runs-on: ubuntu-latest
@@ -70,7 +86,7 @@ jobs:
 
   test-summary:
     name: All GUI checks passed
-    needs: [offline-unit-tests, chromium-gui-e2e]
+    needs: [offline-unit-tests, chromium-gui-e2e, kylin-launcher-check]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -78,8 +94,11 @@ jobs:
         env:
           UNIT: ${{ needs.offline-unit-tests.result }}
           BROWSER: ${{ needs.chromium-gui-e2e.result }}
+          KYLIN: ${{ needs.kylin-launcher-check.result }}
         run: |
           echo "Unit tests: $UNIT"
           echo "Chromium E2E: $BROWSER"
           test "$UNIT" = success
           test "$BROWSER" = success
+          echo "Kylin launcher: $KYLIN"
+          test "$KYLIN" = success
