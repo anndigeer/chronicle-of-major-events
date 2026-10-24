@@ -1649,6 +1649,8 @@ def args_parser():
         ),
         epilog=(
             '常见操作流程（可直接复制命令）:\n'
+            '  不指定月份，自动处理上一个自然月\n'
+            '     python main.py\n'
             '  1. 首次采集 2026 年 9 月并导出 Word\n'
             '     python main.py 2026-09\n'
             '  2. 同月增量补抓新发布新闻，应用人工收录/排除并重建 Word\n'
