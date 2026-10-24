@@ -1,0 +1,85 @@
+name: GUI and full-flow CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gui-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline-unit-tests:
+    name: Offline unit tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.12']
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install scraper dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Check Python syntax
+        run: python -m compileall -q main.py webui.py test_main.py test_webui.py tests
+      - name: Run isolated CLI and GUI tests
+        run: python -m unittest discover -p 'test_*.py' -v
+
+  chromium-gui-e2e:
+    name: Chromium GUI + offline collection/export E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install application and browser test dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install "playwright>=1.50,<2"
+          python -m playwright install --with-deps chromium
+      - name: Exercise Chinese browser GUI and full workflow
+        run: python tests/gui_browser_e2e.py
+      - name: Upload GUI screenshot, output summary and failure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-e2e-results
+          path: test-artifacts/gui/
+          if-no-files-found: warn
+          retention-days: 14
+
+  test-summary:
+    name: All GUI checks passed
+    needs: [offline-unit-tests, chromium-gui-e2e]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Reject failed or skipped test jobs
+        env:
+          UNIT: ${{ needs.offline-unit-tests.result }}
+          BROWSER: ${{ needs.chromium-gui-e2e.result }}
+        run: |
+          echo "Unit tests: $UNIT"
+          echo "Chromium E2E: $BROWSER"
+          test "$UNIT" = success
+          test "$BROWSER" = success
