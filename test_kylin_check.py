@@ -15,6 +15,52 @@ class TestKylinDiagnostics(unittest.TestCase):
         self.assertEqual(doctor.parse_version('2.32.3.post1'), (2, 32, 3))
         self.assertEqual(doctor.parse_version('unknown'), (0,))
 
+    def test_dependency_range_and_exact_single_package_command(self):
+        from types import SimpleNamespace
+        with patch('kylin_check.importlib.import_module',
+                   return_value=SimpleNamespace(__version__='3.0.10')), \
+             patch('importlib.metadata.version', return_value='3.0.10'):
+            status=doctor.check_package('openpyxl','openpyxl',(3,1))
+        self.assertFalse(status['ok'])
+        self.assertEqual(status['error'], '版本过低')
+        self.assertEqual(status['required'], 'openpyxl>=3.1,<4')
+        self.assertEqual(status['install_command'],
+                         'sh ./市委大事记.sh install openpyxl')
+        self.assertIn("'openpyxl>=3.1,<4'", status['upgrade_command'])
+        with patch('kylin_check.importlib.import_module',
+                   return_value=SimpleNamespace(__version__='4.0.0')), \
+             patch('importlib.metadata.version', return_value='4.0.0'):
+            newer=doctor.check_package('openpyxl','openpyxl',(3,1))
+        self.assertFalse(newer['ok'])
+        self.assertIn('版本过高', newer['error'])
+
+    def test_diagnostics_prints_only_actionable_targeted_upgrades(self):
+        with tempfile.TemporaryDirectory() as folder:
+            packages=[
+                {'name':'requests','required':'requests>=2.32,<3',
+                 'installed':'2.31.0','ok':False,'error':'版本过低',
+                 'install_command':'sh ./市委大事记.sh install requests',
+                 'upgrade_command':"./.venv/bin/python -m pip install --upgrade 'requests>=2.32,<3'"},
+                {'name':'openpyxl','required':'openpyxl>=3.1,<4',
+                 'installed':'3.1.5','ok':True,'error':'',
+                 'install_command':'sh ./市委大事记.sh install openpyxl',
+                 'upgrade_command':"./.venv/bin/python -m pip install --upgrade 'openpyxl>=3.1,<4'"},
+            ]
+            with patch.object(doctor,'REQUIRED',(
+                ('requests','requests',(2,32)),
+                ('openpyxl','openpyxl',(3,1)) )), \
+                 patch.object(doctor,'check_package',
+                              side_effect=packages), \
+                 patch.object(doctor.platform,'machine',
+                              return_value='mips64el'), \
+                 patch.object(doctor.shutil,'which',return_value=None):
+                result=doctor.diagnose(Path(folder))
+            text=doctor.format_diagnostics(result)
+            self.assertIn('install requests',text)
+            self.assertNotIn('install openpyxl',text)
+            self.assertIn('requests>=2.32,<3',text)
+            self.assertIn('install all',text)
+
     def test_os_release_only_reads_public_fields(self):
         with tempfile.TemporaryDirectory() as folder:
             path=Path(folder)/'os-release'
