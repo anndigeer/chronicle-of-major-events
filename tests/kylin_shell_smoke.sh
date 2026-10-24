@@ -1,35 +1,70 @@
 #!/bin/sh
-# Simulate an ordinary Kylin user launching the project from a path with spaces.
-# No sudo, no package installation and no actual network news requests.
+# Kylin unified Shell launcher: no sudo, downloads, or real news requests.
 set -eu
 cd "$(dirname "$0")/.."
-for file in "启动网页界面.sh" "首次安装_银河麒麟.sh" "创建桌面快捷方式.sh"; do
-    sh -n "./$file"
-    printf '语法正常：%s\n' "$file"
-done
+sh -n "./市委大事记.sh"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 project="$tmp/银河麒麟 项目"
 mkdir -p "$project" "$tmp/home/桌面"
-cp "./启动网页界面.sh" "$project/启动网页界面.sh"
-cp "./创建桌面快捷方式.sh" "$project/创建桌面快捷方式.sh"
+cp ./市委大事记.sh "$project/市委大事记.sh"
+cat > "$project/kylin_check.py" <<'PY'
+def diagnose():
+    return {'core_ready': False, 'packages': [
+        {'name':'openpyxl','ok':False},
+        {'name':'requests','ok':True}]}
+if __name__ == '__main__':
+    print('KYLINDIAG_MOCK')
+PY
 cat > "$project/webui.py" <<'PY'
 import sys
-print("GUI_LAUNCH_SMOKE " + " ".join(sys.argv[1:]))
+print('GUI_LAUNCH_SMOKE ' + ' '.join(sys.argv[1:]))
 PY
 
-launch_output=$(sh "$project/启动网页界面.sh" --no-browser --port 0)
-printf '%s\n' "$launch_output"
-case "$launch_output" in
-    *"GUI_LAUNCH_SMOKE --no-browser --port 0"*) ;;
-    *) echo "ERROR: launcher did not forward GUI arguments" >&2; exit 1 ;;
+# Default and explicit start must both forward args, even from unicode/spaces.
+launch=$(sh "$project/市委大事记.sh" start --no-browser --port 0)
+case "$launch" in
+  *"KYLINDIAG_MOCK"*"GUI_LAUNCH_SMOKE --no-browser --port 0"*) ;;
+  *) echo "Launcher/start failed: $launch" >&2; exit 1 ;;
+esac
+default=$(sh "$project/市委大事记.sh" --no-browser 2>&1 || true)
+case "$default" in
+  *"未知命令"*) ;; # Default only applies if NO args: documented contract.
+  *) echo "Unknown options should fail clearly" >&2; exit 1 ;;
+esac
+default=$(sh "$project/市委大事记.sh")
+case "$default" in
+  *"GUI_LAUNCH_SMOKE"*) ;;
+  *) echo "Default startup failed" >&2; exit 1 ;;
+esac
+check=$(sh "$project/市委大事记.sh" check)
+case "$check" in
+  *"KYLINDIAG_MOCK"*) ;;
+  *) echo "Check failed" >&2; exit 1 ;;
+esac
+help=$(sh "$project/市委大事记.sh" help)
+case "$help" in
+  *"install openpyxl"*"openpyxl>=3.1,<4"*) ;;
+  *) echo "Help missing targeted installation guidance" >&2; exit 1 ;;
 esac
 
-HOME="$tmp/home" sh "$project/创建桌面快捷方式.sh"
+# Invalid package and noninteractive install must not create a venv.
+if sh "$project/市委大事记.sh" install arbitrary-package >/dev/null 2>&1; then
+  echo "Invalid package unexpectedly accepted" >&2; exit 1
+fi
+if sh "$project/市委大事记.sh" install openpyxl </dev/null >/dev/null 2>&1; then
+  echo "Noninteractive dependency installation unexpectedly succeeded" >&2; exit 1
+fi
+test ! -e "$project/.venv" || {
+  echo "Noninteractive install modified the environment" >&2; exit 1;
+}
+
+HOME="$tmp/home" sh "$project/市委大事记.sh" desktop
 shortcut="$tmp/home/.local/share/applications/chronicle-of-major-events.desktop"
-test -f "$shortcut" || { echo "ERROR: missing desktop menu launcher" >&2; exit 1; }
+test -f "$shortcut" || { echo "Missing application shortcut" >&2; exit 1; }
 grep -q '^Terminal=true$' "$shortcut"
 grep -q "^Path=$project$" "$shortcut"
+grep -q "^Exec=/bin/sh \"$project/市委大事记.sh\" start$" "$shortcut"
 grep -q '^Name=市委大事记$' "$shortcut"
-printf '%s\n' "Kylin launcher and shortcut smoke: PASS"
+echo 'PASS: unified Kylin shell start/check/install guard/desktop smoke'
