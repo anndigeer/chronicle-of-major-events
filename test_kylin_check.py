@@ -64,7 +64,7 @@ class TestKylinDiagnostics(unittest.TestCase):
             self.assertIn('"openpyxl>=3.1,<4"', status['upgrade_command'])
         else:
             self.assertEqual(status['install_command'],
-                             'sh ./市委大事记.sh install openpyxl')
+                             'sh ./Start.sh install openpyxl')
             self.assertIn("'openpyxl>=3.1,<4'", status['upgrade_command'])
         with patch('importlib.metadata.version', return_value='4.0.0'), \
              patch('kylin_check.importlib.import_module',
@@ -78,11 +78,11 @@ class TestKylinDiagnostics(unittest.TestCase):
             packages=[
                 {'name':'requests','required':'requests>=2.32,<3',
                  'installed':'2.31.0','ok':False,'error':'版本过低',
-                 'install_command':'sh ./市委大事记.sh install requests',
+                 'install_command':'sh ./Start.sh install requests',
                  'upgrade_command':"./.venv/bin/python -m pip install --upgrade 'requests>=2.32,<3'"},
                 {'name':'openpyxl','required':'openpyxl>=3.1,<4',
                  'installed':'3.1.5','ok':True,'error':'',
-                 'install_command':'sh ./市委大事记.sh install openpyxl',
+                 'install_command':'sh ./Start.sh install openpyxl',
                  'upgrade_command':"./.venv/bin/python -m pip install --upgrade 'openpyxl>=3.1,<4'"},
             ]
             with patch.object(doctor,'REQUIRED',(
@@ -125,7 +125,7 @@ class TestKylinDiagnostics(unittest.TestCase):
                               side_effect=lambda d, m, v: {
                                   'name':d, 'installed':'', 'ok':False,
                                   'required':'example>=1,<2','error':'缺少软件包',
-                                  'install_command':'sh ./市委大事记.sh install example',
+                                  'install_command':'sh ./Start.sh install example',
                                   'upgrade_command':"./.venv/bin/python -m pip install --upgrade 'example>=1,<2'"}), \
                  patch.object(doctor.shutil, 'which', return_value=None):
                 result=doctor.diagnose(root)
