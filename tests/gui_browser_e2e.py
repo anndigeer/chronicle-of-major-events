@@ -14,6 +14,7 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 from http.server import ThreadingHTTPServer
 
 from docx import Document
@@ -98,18 +99,33 @@ def by_url(ws, suffix: str) -> int:
     raise AssertionError('Missing fixture URL suffix: '+suffix)
 
 
-def run_browser_test(page, jobs, folder: Path):
+def click_and_wait(page, jobs, label: str, month='2026-09'):
+    """Distinguish a new command from the preceding command's success."""
+    prior=jobs.status(month)['job_id']
+    page.get_by_role('button', name=label).click()
+    until=time.monotonic()+75
+    while time.monotonic()<until:
+        current=jobs.status(month)
+        if current['job_id']>prior and not current['running']:
+            assert current['code']==0, label+' failed:\n'+current['log']
+            page.wait_for_function(
+                "() => document.getElementById('status').textContent.includes('最近一次成功')",
+                timeout=12000)
+            return
+        time.sleep(0.08)
+    raise TimeoutError('Timed out waiting for GUI task: '+label)
+
+
+def run_browser_test(page, jobs, folder: Path, port: int):
     results = folder/'results'
     workbook = results/'jiujiang_news.xlsx'
     word = results/'市委大事记（2026年9月）.docx'
 
-    page.goto('http://127.0.0.1:'+str(page.context._ci_server_port)+'/', wait_until='domcontentloaded')
+    page.goto('http://127.0.0.1:'+str(port)+'/', wait_until='domcontentloaded')
     page.locator('#month').fill('2026-09')
     assert page.get_by_role('button', name='增量采集 + 更新 Word').count() == 1
     assert page.get_by_role('button', name='打开 Excel').count() == 1
-    page.get_by_role('button', name='增量采集 + 更新 Word').click()
-    page.wait_for_function("""() => document.getElementById('status').textContent.includes('最近一次成功')""",
-                           timeout=60000)
+    click_and_wait(page,jobs,'增量采集 + 更新 Word')
     assert workbook.is_file(), 'Full GUI run did not create Excel'
     assert word.is_file(), 'Full GUI run did not create Word'
     wb = load_workbook(workbook)
@@ -131,9 +147,7 @@ def run_browser_test(page, jobs, folder: Path):
     ws.cell(included_row,5).value = '收录'
     ws.cell(included_row,8).value = '2026-09-20'
     wb.save(workbook)
-    page.get_by_role('button', name='按人工收录/排除重建 Word').click()
-    page.wait_for_function("""() => document.getElementById('status').textContent.includes('最近一次成功')""",
-                           timeout=60000)
+    click_and_wait(page,jobs,'按人工收录/排除重建 Word')
     headings = article_headings(word)
     assert '陈云开展调研乙' not in headings, 'Exclusion still appeared in Word'
     assert '普通政策解读' in headings, 'Manual include not applied'
@@ -142,32 +156,22 @@ def run_browser_test(page, jobs, folder: Path):
     # A subsequent sync must only append new rows and leave the Word alone.
     word_bytes = word.read_bytes()
     (folder/'add_new_article.flag').write_text('yes', encoding='ascii')
-    page.get_by_role('button', name='仅增量同步 Excel').click()
-    page.wait_for_function("""() => document.getElementById('status').textContent.includes('最近一次成功')""",
-                           timeout=60000)
+    click_and_wait(page,jobs,'仅增量同步 Excel')
     updated = load_workbook(workbook)
     assert updated.active.max_row == 6
     assert updated.active.cell(by_url(updated.active,'1002.html'),5).value == '排除'
     assert word.read_bytes() == word_bytes, '--sync unexpectedly rewrote Word'
 
-    page.get_by_role('button', name='按人工收录/排除重建 Word').click()
-    page.wait_for_function("""() => document.getElementById('status').textContent.includes('最近一次成功')""",
-                           timeout=60000)
+    click_and_wait(page,jobs,'按人工收录/排除重建 Word')
     assert '陈云参加会议丁' in article_headings(word)
     assert '陈云开展调研乙' not in article_headings(word)
 
-    page.get_by_role('button', name='核验成果').click()
-    page.wait_for_function("""() => document.getElementById('status').textContent.includes('最近一次成功')""",
-                           timeout=60000)
+    click_and_wait(page,jobs,'核验成果')
     report = json.loads((results/'抓取检查报告.json').read_text(encoding='utf-8'))
     assert not report['errors'], report
     assert report['word_articles'] == len(article_headings(word))
-    page.get_by_role('button', name='检查 Excel').click()
-    page.wait_for_function("""() => document.getElementById('status').textContent.includes('最近一次成功')""",
-                           timeout=60000)
-    page.get_by_role('button', name='检查名单').click()
-    page.wait_for_function("""() => document.getElementById('status').textContent.includes('最近一次成功')""",
-                           timeout=60000)
+    click_and_wait(page,jobs,'检查 Excel')
+    click_and_wait(page,jobs,'检查名单')
     assert '陈云' in page.locator('#log').inner_text()
     page.screenshot(path=str(ARTIFACTS/'gui-success.png'),full_page=True)
     (ARTIFACTS/'summary.json').write_text(json.dumps({
@@ -201,11 +205,9 @@ def main():
                 browser=playwright.chromium.launch(headless=True)
                 context=browser.new_context(viewport={'width':1320,'height':900},
                                             locale='zh-CN')
-                # Test metadata used by helper without exposing public socket.
-                context._ci_server_port=server.server_port
                 page=context.new_page()
                 try:
-                    run_browser_test(page,jobs,root)
+                    run_browser_test(page,jobs,root,server.server_port)
                     print('PASS: Chromium GUI + offline collection + manual edits '
                           '+ increment + export + verification')
                 except Exception:
