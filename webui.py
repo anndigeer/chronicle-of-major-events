@@ -109,6 +109,7 @@ class Jobs:
         self.running = False
         self.mode = ''
         self.code = None
+        self.job_id = 0
         self.month = ''
         self.lines = []
 
@@ -123,6 +124,7 @@ class Jobs:
                 command.append(month)
             if MODES[mode]:
                 command.append(MODES[mode])
+            self.job_id += 1
             self.running, self.mode, self.code, self.month = True, mode, None, month
             self.lines = ['执行：'+' '.join(command)]
         threading.Thread(target=self._worker, args=(command,), daemon=True).start()
@@ -161,7 +163,8 @@ class Jobs:
         if sys.version_info < (3, 10):
             missing.insert(0, 'Python 3.10+')
         with self.lock:
-            return {'running':self.running,'mode':self.mode,'code':self.code,
+            return {'running':self.running,'job_id':self.job_id,
+                    'mode':self.mode,'code':self.code,
                     'log':'\n'.join(self.lines),
                     'environment':{'ready':not missing,'missing':missing},
                     'files':{'excel':(folder/'jiujiang_news.xlsx').is_file(),
