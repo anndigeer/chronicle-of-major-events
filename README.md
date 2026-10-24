@@ -95,6 +95,27 @@ python3 main.py --test
 
 ## Windows：在本地电脑运行和测试
 
+**Windows PowerShell 中不要运行 `./市委大事记.sh`。** `.sh` 是为银河麒麟/Linux 的 POSIX Shell 准备的，PowerShell 不会按 Linux Shell 语法执行它。Windows 现在自带原生入口 **`市委大事记.cmd`**，不需要 Git Bash、WSL 或调整 PowerShell 脚本执行策略。
+
+~~~powershell
+# 首次使用 / 每次更新
+git pull origin main
+
+# 直接启动网页，默认自动打开浏览器
+.\市委大事记.cmd
+
+# 只读检查 Python 版本和采集依赖
+.\市委大事记.cmd check
+
+# 查看使用帮助
+.\市委大事记.cmd help
+
+# 指定本机端口并禁止自动打开浏览器（调试）
+.\市委大事记.cmd start --no-browser --port 8765
+~~~
+
+若终端已有 `(.venv)`，也可以直接执行 `python webui.py`。正常启动后会显示 `http://127.0.0.1:端口号/`；浏览器没有自动打开时，把这个地址复制到浏览器即可。**终端需要持续运行**，关闭该终端或按 Ctrl+C 会停止网页服务。
+
 需要安装 Git 和 Python **3.10 或以上**（建议 3.12）。以下命令在 **PowerShell** 中执行。可以把 `D:\PythonProjects` 换成自己准备使用的文件夹（需事先创建）。
 
 ~~~powershell
@@ -119,7 +140,7 @@ py -3 -m venv .venv
 
 **不需要执行 `Activate.ps1`**，直接使用虚拟环境中的 `python.exe`，避免 PowerShell 执行策略拦截。如果输入 `py` 显示未找到命令，可尝试 `python -m venv .venv`（需要已安装 Python 并添加到 PATH）。
 
-以后进入项目目录，可以直接运行：
+以后进入项目目录，可以双击 `市委大事记.cmd` 打开图形界面，也可以运行命令行版本：
 
 ~~~powershell
 .\.venv\Scripts\python.exe main.py
