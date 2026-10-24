@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hmac
-import importlib.util
+from kylin_check import diagnose
 import json
 import os
 from pathlib import Path
@@ -22,7 +22,8 @@ ROOT = Path(__file__).resolve().parent
 MONTH = re.compile(r'20\d{2}-(?:0[1-9]|1[0-2])\Z')
 MODES = {'all': '', 'sync': '--sync', 'export': '--export',
          'verify': '--verify', 'check-excel': '--check-excel',
-         'check-names': '--check-names', 'update-leaders': '--update-leaders'}
+         'check-names': '--check-names', 'update-leaders': '--update-leaders',
+         'diagnose': ''}
 
 PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -56,7 +57,7 @@ overflow:auto;min-height:130px;max-height:420px;border-radius:9px;font-size:13px
 <button data-open="excel">打开 Excel</button><button data-open="word">打开本月 Word</button>
 <button data-open="folder">打开结果目录</button><button data-open="names">编辑 names.txt</button>
 <button data-run="check-names">检查名单</button><button data-run="check-excel">检查 Excel</button>
-<button data-run="update-leaders">联网更新领导名单</button></div>
+<button data-run="update-leaders">联网更新领导名单</button><button data-run="diagnose">检测电脑环境</button></div>
 <p class="note" id="files">正在检查结果文件……</p><p class="note" id="environment"></p></section>
 <section class="panel"><h2>③ 执行日志　<span id="status">未运行</span></h2>
 <pre id="log">尚未运行任务。</pre><button id="refresh">刷新日志</button>
@@ -79,11 +80,13 @@ async function refresh(){
   el('status').textContent=s.running?'（正在运行）':s.code===null?'（尚未运行）':
    s.code===0?'（最近一次成功）':'（最近一次失败，请看日志）';
   el('log').textContent=s.log||'尚未运行任务。';
-  el('environment').textContent=s.environment.ready?'运行环境：Python 与采集依赖已就绪':'运行环境：缺少 '+s.environment.missing.join('、')+'；请先运行「首次安装_银河麒麟.sh」';
+  el('environment').textContent=s.environment.ready?'运行环境：采集功能已就绪':'运行环境：需要处理 '+s.environment.missing.join('、')+'。可点击「检测电脑环境」查看原因。';
   el('files').textContent='Excel：'+(s.files.excel?'已生成':'暂无')+
    '｜本月 Word：'+(s.files.word?'已生成':'暂无')+
    '｜链接待复核：'+(s.files.review?'有，请处理':'无');
-  document.querySelectorAll('[data-run],[data-open]').forEach(b=>b.disabled=s.running);
+  document.querySelectorAll('[data-run],[data-open]').forEach(b=>{
+   b.disabled=s.running || (b.dataset.run && b.dataset.run!=='diagnose' && !s.environment.ready);
+  });
  }catch(e){el('status').textContent='（连接失败：'+e.message+'）';}
 }
 async function run(mode){
@@ -112,6 +115,13 @@ class Jobs:
         self.job_id = 0
         self.month = ''
         self.lines = []
+        result = diagnose(self.root)
+        missing = [p['name'] for p in result['packages'] if not p['ok']]
+        if not result['python_ok']:
+            missing.insert(0, 'Python 3.10+')
+        self.environment = {'ready': result['core_ready'], 'missing': missing,
+                            'architecture': result['arch_description'],
+                            'python': result['python']}
 
     def start(self, month: str, mode: str):
         if not MONTH.fullmatch(month) or mode not in MODES:
@@ -119,7 +129,13 @@ class Jobs:
         with self.lock:
             if self.running:
                 raise RuntimeError('已有任务正在运行，请先等待其结束')
-            command = [self.python, '-u', str(self.root / 'main.py')]
+            if not self.environment['ready'] and mode != 'diagnose':
+                raise RuntimeError('Python或采集依赖未满足，先点击「检测电脑环境」查看原因')
+            if mode == 'diagnose':
+                command = [self.python, '-u', str(Path(__file__).with_name('kylin_check.py')),
+                           '--root', str(self.root)]
+            else:
+                command = [self.python, '-u', str(self.root / 'main.py')]
             if mode in {'all', 'sync', 'export', 'verify'}:
                 command.append(month)
             if MODES[mode]:
@@ -158,15 +174,11 @@ class Jobs:
         y, m = map(int, month.split('-'))
         folder = self.root/'results'
         word = folder/f'市委大事记（{y}年{m}月）.docx'
-        missing=[key for key in ('requests','bs4','openpyxl','docx')
-                 if importlib.util.find_spec(key) is None]
-        if sys.version_info < (3, 10):
-            missing.insert(0, 'Python 3.10+')
         with self.lock:
             return {'running':self.running,'job_id':self.job_id,
                     'mode':self.mode,'code':self.code,
                     'log':'\n'.join(self.lines),
-                    'environment':{'ready':not missing,'missing':missing},
+                    'environment':self.environment,
                     'files':{'excel':(folder/'jiujiang_news.xlsx').is_file(),
                              'word':word.is_file(),
                              'review':(folder/'链接冲突待复核.csv').is_file()}}
