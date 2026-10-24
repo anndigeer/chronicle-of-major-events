@@ -41,7 +41,8 @@ LEADERS_URL = 'https://jiangxi.jxnews.com.cn/leader.shtml'
 LEADER_SECTIONS = ('省委', '人大', '政府', '政协')
 AUTO_NAMES_FILE = 'names.auto.txt'
 DEFAULT_NAMES = ['陈云', '邓永翔', '黄强', '陈永奇', '庄兆林', '黄喜忠']
-HEADERS = ['新闻标题', '发布日期', '自动匹配', '命中姓名', '人工选择', '正文状态', '原文链接', '说明', '事件日期']
+HEADERS = ['新闻标题', '发布日期', '自动匹配', '命中姓名', '人工选择', '正文状态', '说明', '事件日期']
+LEGACY_LINK_NOTE = '【原文链接待核】'
 RE_DATE = re.compile(r'(20\d{2})[-年/.](1[0-2]|0?[1-9])[-月/.](3[01]|[12]\d|0?[1-9])(?:日)?(?!\d)')
 RE_ISO = re.compile(r'20\d{2}-\d{2}-\d{2}')
 INVALID_URL = re.compile(r'^(?:#|javascript:|mailto:|tel:)', re.I)
@@ -664,55 +665,75 @@ def canonical_news_url(base: str, href: object) -> str:
     return url
 
 
+def legacy_link_candidate(note: object) -> str:
+    """Recover a legacy G-column conflict saved in the new G note cell."""
+    match = re.search(re.escape(LEGACY_LINK_NOTE) + r'(https?://[^\s]+)',
+                      str(note or ''))
+    return match.group(1) if match else ''
+
+
+def migrate_legacy_columns(ws, base: str) -> None:
+    """Convert old A:I to A:H exactly once, keeping links and manual data.
+
+    The former G URL is redundant. If it disagrees with the actual A
+    hyperlink, retain it inside a review marker in the former H note;
+    after the physical column deletion, that note becomes G.
+    """
+    if norm_space(ws.cell(1, 7).value) != '原文链接':
+        return
+    for idx in range(2, ws.max_row + 1):
+        a = ws.cell(idx, 1)
+        old_g = ws.cell(idx, 7)
+        old_note = ws.cell(idx, 8)
+        a_url = canonical_news_url(base, get_cell_url(a))
+        old_url = canonical_news_url(base, get_cell_url(old_g, old_g.value))
+        title = get_cell_title(a)
+        if not a_url and old_url:
+            if a.data_type == 'f' and title:
+                a.value = title
+            a.hyperlink = old_url
+        elif a_url and old_url and a_url != old_url:
+            # Do not discard mismatched source links when removing column G.
+            marker = LEGACY_LINK_NOTE + old_url
+            old_note.value = (str(old_note.value or '').rstrip() + '\n' + marker).strip()
+    ws.delete_cols(7, 1)
+    LOG.info('已将旧版Excel从A:I迁移为A:H；原G列原文链接已取消')
+
+
 def reconcile_row_link(row, base: str, con: sqlite3.Connection | None = None,
                        source: str = 'jjxw',
                        conflicts: list[dict] | None = None) -> str:
-    """Reconcile A/G only with unique title evidence; retain ambiguous links."""
-    a, g = row[0], row[6]
-    a_url = canonical_news_url(base, get_cell_url(a))
-    g_url = canonical_news_url(base, g.value)
-    if not (a_url or g_url):
-        return ''
-    choice = g_url or a_url
+    """A-column hyperlink is the only authoritative URL after migration."""
+    a = row[0]
+    url = canonical_news_url(base, get_cell_url(a))
     title = get_cell_title(a)
-    if a_url and g_url and a_url != g_url:
-        cached = {}
-        if con is not None:
-            cached = {n['url']: n for n in con.execute(
-                'SELECT url,title,article_title FROM news '
-                'WHERE source=? AND url IN (?,?)',
-                (source, a_url, g_url))}
-        visible = clean_title(title).casefold()
-        title_matches = {
-            url for url, n in cached.items()
-            if visible and visible in {
-                clean_title(n['title']).casefold(),
-                clean_title(n['article_title']).casefold()
-            }
-        }
-        if len(title_matches) == 1:
-            choice = next(iter(title_matches))
-            LOG.warning('第%s行A/G冲突，依据唯一标题匹配修复为：%s', a.row, choice)
+    if a.data_type == 'f' and title:
+        a.value = title
+        if url:
+            a.hyperlink = url
+    if a.hyperlink and a.hyperlink.target and url and a.hyperlink.target != url:
+        a.hyperlink = url
+    note = row[6] if len(row) > 6 else None
+    old_url = canonical_news_url(base, legacy_link_candidate(note.value)) if note else ''
+    if old_url:
+        if url == old_url:
+            # Editing A to the saved original G candidate resolves the
+            # discrepancy; remove just the review marker, not other notes.
+            note.value = re.sub(re.escape(LEGACY_LINK_NOTE) + r'https?://[^\s]+',
+                                '', str(note.value)).strip() or None
         else:
             if conflicts is not None:
                 conflicts.append({
-                    'row': a.row, 'title': title, 'a_url': a_url,
-                    'g_url': g_url, 'reason': '缓存中无唯一的新闻标题对应关系'
+                    'row': a.row, 'title': title, 'a_url': url,
+                    'g_url': old_url, 'reason': '旧版A/G原文链接不一致；请核实后清除G列待核标记'
                 })
-            LOG.error('第%s行A/G链接冲突尚未解决，请人工核对：A=%s；G=%s',
-                      a.row, a_url, g_url)
+            LOG.error('第%s行旧版链接存在冲突，A=%s；历史G=%s', a.row, url, old_url)
             return ''
-    if a.data_type == 'f' and title:
-        a.value = title
-    if not a.hyperlink or a.hyperlink.target != choice:
-        a.hyperlink = choice
-    if g.value != choice:
-        g.value = choice
-    return choice
+    return url
 
 
 def open_book(path: Path):
-    """One worksheet only; main() backs up the original workbook first."""
+    """One worksheet, A:H; migrate historical G links before rewriting headers."""
     if path.exists():
         book = load_workbook(path)
     else:
@@ -726,6 +747,7 @@ def open_book(path: Path):
             LOG.warning('旧工作表“%s”不再处理，已保留在运行前Excel备份中', old)
             del book[old]
     ws = book[name]
+    migrate_legacy_columns(ws, SOURCES['jjxw']['base'])
     for i, header in enumerate(HEADERS, 1):
         cell = ws.cell(1, i)
         cell.value = header
@@ -733,10 +755,13 @@ def open_book(path: Path):
         cell.font = Font(name='微软雅黑', size=11, bold=True, color='FFFFFF')
         cell.alignment = Alignment(horizontal='center', vertical='center')
     for col, width in {'A': 73, 'B': 16, 'C': 14, 'D': 25,
-                       'E': 14, 'F': 16, 'G': 68, 'H': 35, 'I': 18}.items():
+                       'E': 14, 'F': 16, 'G': 35, 'H': 18}.items():
         ws.column_dimensions[col].width = width
+    # Remove the former I-column width left behind by openpyxl after a shift.
+    if 'I' in ws.column_dimensions:
+        del ws.column_dimensions['I']
     ws.freeze_panes = 'C2'
-    ws.auto_filter.ref = f'A1:I{max(ws.max_row, 2)}'
+    ws.auto_filter.ref = f'A1:H{max(ws.max_row, 2)}'
     ws.row_dimensions[1].height = 27
     if not ws.data_validations.dataValidation:
         validation = DataValidation(type='list', formula1='"收录,排除"', allow_blank=True)
@@ -757,12 +782,12 @@ def existing_rows(book, con: sqlite3.Connection,
             row = [ws.cell(idx, j) for j in range(1, 9)]
             url = reconcile_row_link(row, info['base'], con, source, conflicts)
             if not url:
-                # Keep both candidates in the known set so a re-crawl does
-                # not duplicate an existing row awaiting manual verification.
+                # Hold both historical candidates to avoid duplicate
+                # insertion until a legacy mismatch is reviewed.
                 candidate_a = canonical_news_url(info['base'], get_cell_url(row[0]))
-                candidate_g = canonical_news_url(info['base'], row[6].value)
-                if candidate_a and candidate_g and candidate_a != candidate_g:
-                    urls[source].update((candidate_a, candidate_g))
+                candidate_old = canonical_news_url(
+                    info['base'], legacy_link_candidate(row[6].value))
+                urls[source].update(filter(None, (candidate_a, candidate_old)))
                 continue
             if url in urls[source]:
                 continue
@@ -820,16 +845,10 @@ def write_new_rows(book, records: dict[str, list[News]]):
         base = SOURCES[source]['base']
         known = set()
         for idx in range(2, ws.max_row + 1):
-            a = ws.cell(idx, 1)
-            g = ws.cell(idx, 7)
-            # Both valid candidates represent an existing workbook row,
-            # even when they disagree and await a human decision.
-            a_link = canonical_news_url(base, get_cell_url(a))
-            g_link = canonical_news_url(base, g.value)
-            if a_link:
-                known.add(a_link)
-            if g_link:
-                known.add(g_link)
+            a_link = canonical_news_url(base, get_cell_url(ws.cell(idx, 1)))
+            old_link = canonical_news_url(
+                base, legacy_link_candidate(ws.cell(idx, 7).value))
+            known.update(filter(None, (a_link, old_link)))
         added = 0
         for item in sorted(news, key=lambda n: (n.pub_date, n.title)):
             url = canonical_news_url(base, item.url)
@@ -845,9 +864,8 @@ def write_new_rows(book, records: dict[str, list[News]]):
             b = ws.cell(idx, 2, item.pub_date)
             b.font = Font(name='微软雅黑', size=11)
             b.alignment = Alignment(horizontal='center', vertical='center')
-            ws.cell(idx, 7, url)
             ws.row_dimensions[idx].height = 28
-        ws.auto_filter.ref = f'A1:I{ws.max_row}'
+        ws.auto_filter.ref = f'A1:H{ws.max_row}'
         LOG.info('%s：按发布日期增量累计新增 %d 条（保留所有原有行）',
                  SOURCES[source]['sheet'], added)
 
@@ -1072,7 +1090,7 @@ def refresh_book(book, con: sqlite3.Connection, names: list[str], cfg: dict) -> 
     for source in SOURCES:
         ws = book[SOURCES[source]['sheet']]
         for i in range(2, ws.max_row + 1):
-            row = [ws.cell(i, k) for k in range(1, 10)]
+            row = [ws.cell(i, k) for k in range(1, 9)]
             url = reconcile_row_link(row, SOURCES[source]['base'], con, source)
             if not url:
                 continue
@@ -1082,10 +1100,10 @@ def refresh_book(book, con: sqlite3.Connection, names: list[str], cfg: dict) -> 
             paras = json.loads(n['body_json'] or '[]')
             matches = match_names(n['article_title'] or n['title'], '\n'.join(paras), names, cfg['include_body_matches'])
             choose = selection(row)
-            # Column I: preserve human edits, recalculate machine guesses.
+            # Column H: preserve human edits, recalculate machine guesses.
             # The comment stores our last guess. If the value differs, it
             # was edited manually and should never be overwritten.
-            event_cell = row[8]
+            event_cell = row[7]
             raw_event = event_cell.value
             event_day = (raw_event.strftime('%Y-%m-%d')
                          if isinstance(raw_event, (date, datetime))
@@ -1134,20 +1152,19 @@ def refresh_book(book, con: sqlite3.Connection, names: list[str], cfg: dict) -> 
             row[3].value = '、'.join(matches)
             row[5].value = n['status']
             # B column is the site's publication date; manually reviewed
-            # event dates belong in column I and must remain untouched.
+            # event dates belong in column H and must remain untouched.
             if row[1].value != n['pub_date']:
                 row[1].value = n['pub_date']
-            row[6].value = url
             if n['status'] != '成功':
-                row[7].value = n['message']
+                row[6].value = n['message']
             elif event_day:
-                row[7].value = '事件日期已填写（I列可复核）'
+                row[6].value = '事件日期已填写（H列可复核）'
             else:
-                row[7].value = '事件日期未确认；跨月新闻请核对后在I列填写'
+                row[6].value = '事件日期未确认；跨月新闻请核对后在H列填写'
             if invalid_event:
-                row[7].value = 'I列事件日期无效：请填写真实日期 YYYY-MM-DD（已暂停收录）'
+                row[6].value = 'H列事件日期无效：请填写真实日期 YYYY-MM-DD（已暂停收录）'
             elif choose == 'exclude':
-                row[7].value = '人工排除；' + row[7].value
+                row[6].value = '人工排除；' + row[6].value
             row[2].alignment = Alignment(horizontal='center')
             row[4].alignment = Alignment(horizontal='center')
             row[5].alignment = Alignment(horizontal='center')
@@ -1294,12 +1311,22 @@ def build_word(month: str, articles: list[dict], out_dir: Path) -> Path | None:
     doc.core_properties.title = f'市委大事记（{y}年{m}月）'
     header = doc.add_paragraph()
     header.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    header.paragraph_format.space_after = Pt(0)
+    header.paragraph_format.keep_with_next = True
+    h_lvl = OxmlElement('w:outlineLvl')
+    h_lvl.set(qn('w:val'), '0')  # Word outline level 1 (zero-based)
+    header._p.get_or_add_pPr().append(h_lvl)
     hrun = header.add_run('市 委 大 事 记')
     hrun.font.name = '方正小标宋简体'
     hrun._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), '方正小标宋简体')
     hrun.font.size = Pt(22)
-    header.add_run('\n')
-    date_run = header.add_run(f'（{y}年{m}月）')
+    subtitle = doc.add_paragraph()
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    subtitle.paragraph_format.space_before = Pt(0)
+    s_lvl = OxmlElement('w:outlineLvl')
+    s_lvl.set(qn('w:val'), '1')  # Word outline level 2 (zero-based)
+    subtitle._p.get_or_add_pPr().append(s_lvl)
+    date_run = subtitle.add_run(f'（{y}年{m}月）')
     date_run.font.name = '楷体_GB2312'
     date_run._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), '楷体_GB2312')
     date_run.font.size = Pt(18)
@@ -1344,11 +1371,7 @@ def build_word(month: str, articles: list[dict], out_dir: Path) -> Path | None:
 
 
 def audit_excel(path: Path) -> dict:
-    """Read-only audit of the cumulative worksheet and article hyperlinks.
-
-    Checks the true A hyperlink destination, independent G original URL,
-    duplicate links and calendar dates. Does not write a repaired workbook.
-    """
+    """Read-only validation of the sole A hyperlink and A:H schema."""
     result = {
         'file': str(path), 'sheet': '九江新闻网', 'total': 0,
         'months': {}, 'issues': [], 'issue_count': 0,
@@ -1375,30 +1398,37 @@ def audit_excel(path: Path) -> dict:
         if '九江新闻网' not in book.sheetnames:
             return result
         ws = book['九江新闻网']
+        if norm_space(ws.cell(1, 7).value) == '原文链接':
+            problem('检测到旧版A:I工作表，需运行一次同步或导出迁移为A:H')
+            event_col = 9
+            legacy = True
+        else:
+            event_col = 8
+            legacy = False
+            if [ws.cell(1, i).value for i in range(1, 9)] != HEADERS:
+                problem('表头不是新版A:H结构')
         seen = {}
         base = SOURCES['jjxw']['base']
         for rowno in range(2, ws.max_row + 1):
-            a, b, g, event = (ws.cell(rowno, n) for n in (1, 2, 7, 9))
-            if not (a.value or b.value or g.value):
+            a, b, event = (ws.cell(rowno, n) for n in (1, 2, event_col))
+            if not (a.value or b.value):
                 continue
             result['total'] += 1
-            title = get_cell_title(a)
-            if not title:
+            if not get_cell_title(a):
                 problem(f'第{rowno}行：A列缺少新闻标题')
-            aurl = canonical_news_url(base, get_cell_url(a))
-            gurl = canonical_news_url(base, g.value)
-            if not aurl:
-                problem(f'第{rowno}行：A列标题没有有效的原文超链接')
-            if not gurl:
-                problem(f'第{rowno}行：G列原文链接无效或为空')
-            if aurl and gurl and aurl != gurl:
-                problem(f'第{rowno}行：A/G链接不一致；A={aurl}；G={gurl}')
-            canonical = gurl or aurl
-            if canonical:
-                if canonical in seen:
-                    problem(f'第{rowno}行：原文链接与第{seen[canonical]}行重复：{canonical}')
-                else:
-                    seen[canonical] = rowno
+            url = canonical_news_url(base, get_cell_url(a))
+            if not url:
+                problem(f'第{rowno}行：A列没有有效的新闻原文超链接')
+            elif url in seen:
+                problem(f'第{rowno}行：超链接与第{seen[url]}行重复：{url}')
+            else:
+                seen[url] = rowno
+            if legacy:
+                old = canonical_news_url(base, ws.cell(rowno, 7).value)
+                if old and url and old != url:
+                    problem(f'第{rowno}行：旧版A/G超链接冲突；A={url}；旧G={old}')
+            elif legacy_link_candidate(ws.cell(rowno, 7).value):
+                problem(f'第{rowno}行：G列说明中存在历史链接待复核标记')
             if isinstance(b.value, (date, datetime)):
                 published = b.value.date().isoformat() if isinstance(b.value, datetime) else b.value.isoformat()
             else:
@@ -1414,7 +1444,7 @@ def audit_excel(path: Path) -> dict:
                 else:
                     event_day = date_from_text(str(event.value))
                 if not event_day:
-                    problem(f'第{rowno}行：I列事件日期无效：{event.value}')
+                    problem(f'第{rowno}行：{("I" if legacy else "H")}列事件日期无效：{event.value}')
     finally:
         book.close()
     result['months'] = dict(sorted(result['months'].items()))
@@ -1524,7 +1554,7 @@ def verify_month_output(month: str, excel: Path, output_dir: Path, grace_days: i
                 if book.sheetnames != ['九江新闻网']:
                     report['errors'].append('Excel必须只有九江新闻网工作表')
                 else:
-                    for row in book.active.iter_rows(min_row=2, max_col=9,
+                    for row in book.active.iter_rows(min_row=2, max_col=8,
                                                      values_only=True):
                         if not row[0]:
                             continue
@@ -1534,7 +1564,7 @@ def verify_month_output(month: str, excel: Path, output_dir: Path, grace_days: i
                         report['news'] += 1
                         if not pub.startswith(month):
                             report['late_candidates'] += 1
-                            if str(row[8] or '').startswith(month):
+                            if str(row[7] or '').startswith(month):
                                 report['late_confirmed'] += 1
                         if row[2] == '命中':
                             report['matched'] += 1
