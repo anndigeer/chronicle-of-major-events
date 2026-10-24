@@ -1,5 +1,7 @@
 # 九江新闻网 · 市委大事记整理工具
 
+> **初次安装和普通用户教程请阅读 [使用文档.md](使用文档.md)**。Windows 启动入口为 **Start.cmd**；银河麒麟/Linux 为 **Start.sh**。两套入口共用 main.py 和 results 数据。
+
 仓库已附带可直接使用的 `names.txt`（无须从 `names.example.txt` 复制）。
 
 **新闻文章仅采集九江新闻网「九江时政」**；领导人名单另可从大江网江西领导页面自动更新。运行时从公开 JSON 接口获取新闻列表及正文，优先根据本地 `names.xlsx`、其次 `names.txt` 或旧版 `config.json` 中的姓名名单筛选，生成 Excel、Word，使用 SQLite 缓存并对 Word 正文去重。**不采集九江市政府网站**，也不会自动添加外部政要姓名。
@@ -12,21 +14,21 @@
 
 ### 一个 Shell 脚本完成检查、安装与启动
 
-银河麒麟现在统一使用 **`市委大事记.sh`**，不再维护三个独立启动/安装/快捷方式脚本。克隆项目后进入项目目录，先运行：
+银河麒麟现在统一使用 **`Start.sh`**，不再维护三个独立启动/安装/快捷方式脚本。克隆项目后进入项目目录，先运行：
 
 ~~~bash
 # 只读环境诊断，显示 Python、CPU 架构与每个依赖的最低/最高版本
-sh ./市委大事记.sh check
+sh ./Start.sh check
 
 # 满足采集要求后，打开本机浏览器图形界面
-sh ./市委大事记.sh
+sh ./Start.sh
 ~~~
 
 检查会比较项目 `requirements.txt` 对应的版本范围，并对不满足条件的每个依赖打印**当前版本、需要的版本、单包更新命令**。例如 openpyxl 为 3.0.10，会提示：
 
 ~~~text
 [待处理] openpyxl>=3.1,<4；当前：3.0.10；版本过低
-单独安装/更新：sh ./市委大事记.sh install openpyxl
+单独安装/更新：sh ./Start.sh install openpyxl
 等价的虚拟环境命令：./.venv/bin/python -m pip install --upgrade 'openpyxl>=3.1,<4'
 ~~~
 
@@ -34,27 +36,27 @@ sh ./市委大事记.sh
 
 ~~~bash
 # 创建/复用项目的 .venv，并安装或更新所有不满足版本范围的依赖
-sh ./市委大事记.sh install all
+sh ./Start.sh install all
 
 # 仅安装或升级一个指定依赖（其他包不主动升级）
-sh ./市委大事记.sh install openpyxl
+sh ./Start.sh install openpyxl
 
 # 其他可指定的名字：requests、beautifulsoup4、python-docx、urllib3
 # 安装完成后重新检测
-sh ./市委大事记.sh check
+sh ./Start.sh check
 ~~~
 
 安装前会显示目标软件包并要求输入 `y` 确认；默认拒绝、无终端时拒绝。**不使用 sudo、不修改系统 Python，只对本项目的 `.venv` 安装依赖**；必要时使用可用 Python 3.10+ 创建虚拟环境，失败时会提示处理对应的 venv/pip 组件。MIPS64 的某些原生依赖可能需要编译或使用系统匹配的软件包，因此不保证每台麒麟机器均能联网直接安装完成。不要使用 ARM/x86/LoongArch 安装包替代 MIPS64。
 
-如果当前系统只有 Python 3.8/3.9，可以先运行 `sh ./市委大事记.sh` 打开诊断界面，但**采集和导出必须有 Python 3.10+**。脚本不会在版本不合格时强行调用新闻采集核心。升级系统 Python 应当从兼容的银河麒麟 MIPS64 官方软件源获得，统一脚本不会擅自替换系统解释器。
+如果当前系统只有 Python 3.8/3.9，可以先运行 `sh ./Start.sh` 打开诊断界面，但**采集和导出必须有 Python 3.10+**。脚本不会在版本不合格时强行调用新闻采集核心。升级系统 Python 应当从兼容的银河麒麟 MIPS64 官方软件源获得，统一脚本不会擅自替换系统解释器。
 
 以后创建桌面快捷方式，只需运行一次：
 
 ~~~bash
-sh ./市委大事记.sh desktop
+sh ./Start.sh desktop
 ~~~
 
-它会添加「市委大事记」到用户应用菜单，并在存在桌面文件夹时创建快捷方式。之后点击图标即可启动；部分麒麟桌面需要右键设为“允许启动”。完整参数运行 `sh ./市委大事记.sh help`；安装包升级后请关闭并重新打开网页工作台，让界面重新检测运行环境。
+它会添加「市委大事记」到用户应用菜单，并在存在桌面文件夹时创建快捷方式。之后点击图标即可启动；部分麒麟桌面需要右键设为“允许启动”。完整参数运行 `sh ./Start.sh help`；安装包升级后请关闭并重新打开网页工作台，让界面重新检测运行环境。
 
 ### 在网页中完成常用工作
 
@@ -83,7 +85,7 @@ Chromium E2E 使用**固定模拟新闻网列表和正文**，但是真实调用
 
 测试结果请以 **Actions 页面的任务状态** 为准：绿色成功表示这一套自动测试通过；红色失败时进入对应 Job 展开失败步骤下载日志。单纯把 workflow 文件提交到仓库并**不代表已经通过了 GitHub Actions 测试**。
 
-**架构限制：** GitHub 的新增麒麟启动自检是对 POSIX shell 和桌面文件的**模拟检查**，在 x86_64 的 Ubuntu runner 上运行，并非 MIPS64 指令集仿真。GitHub 提供的 `ubuntu-latest`、`windows-latest` 测试环境并非龙芯 3A4000 的 MIPS64 银河麒麟机器。这些测试能够验证浏览器交互、Python 核心逻辑以及生成文件，但**无法替代 3A4000 原机测试**。最终仍需在麒麟机器执行一次 `sh ./市委大事记.sh`，重点确认该系统的 Python 版本、MIPS64 依赖包、办公软件关联和桌面启动器。
+**架构限制：** GitHub 的新增麒麟启动自检是对 POSIX shell 和桌面文件的**模拟检查**，在 x86_64 的 Ubuntu runner 上运行，并非 MIPS64 指令集仿真。GitHub 提供的 `ubuntu-latest`、`windows-latest` 测试环境并非龙芯 3A4000 的 MIPS64 银河麒麟机器。这些测试能够验证浏览器交互、Python 核心逻辑以及生成文件，但**无法替代 3A4000 原机测试**。最终仍需在麒麟机器执行一次 `sh ./Start.sh`，重点确认该系统的 Python 版本、MIPS64 依赖包、办公软件关联和桌面启动器。
 
 ### 图形界面离线测试
 
@@ -95,23 +97,23 @@ python3 main.py --test
 
 ## Windows：在本地电脑运行和测试
 
-**Windows PowerShell 中不要运行 `./市委大事记.sh`。** `.sh` 是为银河麒麟/Linux 的 POSIX Shell 准备的，PowerShell 不会按 Linux Shell 语法执行它。Windows 现在自带原生入口 **`市委大事记.cmd`**，不需要 Git Bash、WSL 或调整 PowerShell 脚本执行策略。
+**Windows PowerShell 中不要运行 `./Start.sh`。** `.sh` 是为银河麒麟/Linux 的 POSIX Shell 准备的，PowerShell 不会按 Linux Shell 语法执行它。Windows 现在自带原生入口 **`Start.cmd`**，不需要 Git Bash、WSL 或调整 PowerShell 脚本执行策略。
 
 ~~~powershell
 # 首次使用 / 每次更新
 git pull origin main
 
 # 直接启动网页，默认自动打开浏览器
-.\市委大事记.cmd
+.\Start.cmd
 
 # 只读检查 Python 版本和采集依赖
-.\市委大事记.cmd check
+.\Start.cmd check
 
 # 查看使用帮助
-.\市委大事记.cmd help
+.\Start.cmd help
 
 # 指定本机端口并禁止自动打开浏览器（调试）
-.\市委大事记.cmd start --no-browser --port 8765
+.\Start.cmd start --no-browser --port 8765
 ~~~
 
 现在 `check` 会根据实际操作系统显示 **Windows 或银河麒麟/Linux**。Windows 会检查系统文件关联，不再提示缺少 Linux 的 `xdg-open`；Linux 仍会检查 `xdg-open` 是否可用。两边使用同一套依赖版本规则。
@@ -142,7 +144,7 @@ py -3 -m venv .venv
 
 **不需要执行 `Activate.ps1`**，直接使用虚拟环境中的 `python.exe`，避免 PowerShell 执行策略拦截。如果输入 `py` 显示未找到命令，可尝试 `python -m venv .venv`（需要已安装 Python 并添加到 PATH）。
 
-以后进入项目目录，可以双击 `市委大事记.cmd` 打开图形界面，也可以运行命令行版本：
+以后进入项目目录，可以双击 `Start.cmd` 打开图形界面，也可以运行命令行版本：
 
 ~~~powershell
 .\.venv\Scripts\python.exe main.py
