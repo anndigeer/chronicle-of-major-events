@@ -77,6 +77,14 @@ class TestJjxw(unittest.TestCase):
         text = '截至9月30日，全市召开了工作会议12场。'
         self.assertEqual(j.infer_event_date('情况通报', [text], '2026-10-02'), '')
 
+    def test_reporter_learned_date_not_written_as_event(self):
+        self.assertEqual(j.infer_event_date(
+            '市委新闻', ['10月2日，记者获悉市委召开了重点工作会议。'],
+            '2026-10-02'), '')
+        self.assertEqual(j.infer_event_date(
+            '市委新闻', ['记者10月2日获悉，9月30日，市委召开了重点工作会议。'],
+            '2026-10-02'), '2026-09-30')
+
     def test_relative_event_dates_and_cross_year(self):
         self.assertEqual(j.infer_event_date(
             '工作动态', ['前天，市领导主持召开会议。'], '2026-10-02'),
@@ -416,7 +424,7 @@ class TestJjxw(unittest.TestCase):
                 chosen = j.refresh_book(book, con, ['陈云'], cfg)
                 self.assertEqual(chosen, [])
                 self.assertEqual(ws.cell(2, 8).value, '2026-09-31')
-                self.assertIn('日期无效', ws.cell(2, 8).value)
+                self.assertIn('日期无效', ws.cell(2, 7).value)
                 ws.cell(2, 8, '2026-09-17')
                 chosen = j.refresh_book(book, con, ['陈云'], cfg)
                 self.assertEqual(len(chosen), 1)
