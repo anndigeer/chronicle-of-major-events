@@ -59,9 +59,13 @@ class TestKylinDiagnostics(unittest.TestCase):
         self.assertFalse(status['ok'])
         self.assertEqual(status['error'], '版本过低')
         self.assertEqual(status['required'], 'openpyxl>=3.1,<4')
-        self.assertEqual(status['install_command'],
-                         'sh ./市委大事记.sh install openpyxl')
-        self.assertIn("'openpyxl>=3.1,<4'", status['upgrade_command'])
+        if doctor.sys.platform == 'win32':
+            self.assertIn(r'.\.venv\Scripts\python.exe', status['install_command'])
+            self.assertIn('"openpyxl>=3.1,<4"', status['upgrade_command'])
+        else:
+            self.assertEqual(status['install_command'],
+                             'sh ./市委大事记.sh install openpyxl')
+            self.assertIn("'openpyxl>=3.1,<4'", status['upgrade_command'])
         with patch('importlib.metadata.version', return_value='4.0.0'), \
              patch('kylin_check.importlib.import_module',
                    return_value=SimpleNamespace(__version__='4.0.0')):
@@ -94,7 +98,10 @@ class TestKylinDiagnostics(unittest.TestCase):
             self.assertIn('install requests',text)
             self.assertNotIn('install openpyxl',text)
             self.assertIn('requests>=2.32,<3',text)
-            self.assertIn('install all',text)
+            if doctor.sys.platform == 'win32':
+                self.assertIn('pip install -r requirements.txt',text)
+            else:
+                self.assertIn('install all',text)
 
     def test_os_release_only_reads_public_fields(self):
         with tempfile.TemporaryDirectory() as folder:
