@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hmac
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -56,7 +57,7 @@ overflow:auto;min-height:130px;max-height:420px;border-radius:9px;font-size:13px
 <button data-open="folder">打开结果目录</button><button data-open="names">编辑 names.txt</button>
 <button data-run="check-names">检查名单</button><button data-run="check-excel">检查 Excel</button>
 <button data-run="update-leaders">联网更新领导名单</button></div>
-<p class="note" id="files">正在检查结果文件……</p></section>
+<p class="note" id="files">正在检查结果文件……</p><p class="note" id="environment"></p></section>
 <section class="panel"><h2>③ 执行日志　<span id="status">未运行</span></h2>
 <pre id="log">尚未运行任务。</pre><button id="refresh">刷新日志</button>
 <p class="note">服务仅监听 127.0.0.1，不会向局域网开放。
@@ -78,6 +79,7 @@ async function refresh(){
   el('status').textContent=s.running?'（正在运行）':s.code===null?'（尚未运行）':
    s.code===0?'（最近一次成功）':'（最近一次失败，请看日志）';
   el('log').textContent=s.log||'尚未运行任务。';
+  el('environment').textContent=s.environment.ready?'运行环境：Python 与采集依赖已就绪':'运行环境：缺少 '+s.environment.missing.join('、')+'；请先运行「首次安装_银河麒麟.sh」';
   el('files').textContent='Excel：'+(s.files.excel?'已生成':'暂无')+
    '｜本月 Word：'+(s.files.word?'已生成':'暂无')+
    '｜链接待复核：'+(s.files.review?'有，请处理':'无');
@@ -154,9 +156,14 @@ class Jobs:
         y, m = map(int, month.split('-'))
         folder = self.root/'results'
         word = folder/f'市委大事记（{y}年{m}月）.docx'
+        missing=[key for key in ('requests','bs4','openpyxl','docx')
+                 if importlib.util.find_spec(key) is None]
+        if sys.version_info < (3, 10):
+            missing.insert(0, 'Python 3.10+')
         with self.lock:
             return {'running':self.running,'mode':self.mode,'code':self.code,
                     'log':'\n'.join(self.lines),
+                    'environment':{'ready':not missing,'missing':missing},
                     'files':{'excel':(folder/'jiujiang_news.xlsx').is_file(),
                              'word':word.is_file(),
                              'review':(folder/'链接冲突待复核.csv').is_file()}}
