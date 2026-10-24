@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""银河麒麟/龙芯本机部署诊断。只用 Python 标准库，绝不修改系统配置。"""
+"""跨平台环境诊断（Windows、银河麒麟、Linux）；仅使用 Python 标准库。"""
 from __future__ import annotations
 
 import argparse
@@ -31,6 +31,40 @@ MAXIMUM_EXCLUSIVE = {
 ROOT = Path(__file__).resolve().parent
 
 
+def package_upgrade_command(distribution, specification, system=None):
+    """Return a native-shell command limited to the project's virtual env."""
+    system = system or sys.platform
+    if system == 'win32':
+        return (r'.\.venv\Scripts\python.exe -m pip install --upgrade "' +
+                specification + '"')
+    return ("./.venv/bin/python -m pip install --upgrade '" +
+            specification + "'")
+
+
+def system_description(system=None):
+    system = system or sys.platform
+    if system == 'win32':
+        return 'Windows'
+    if system.startswith('linux'):
+        return '银河麒麟 / Linux'
+    if system == 'darwin':
+        return 'macOS'
+    return platform.system() or '其他系统'
+
+
+def file_open_description(system=None, xdg_open=None):
+    """Do not demand xdg-open on Windows or macOS."""
+    system = system or sys.platform
+    if system == 'win32':
+        return 'Windows 文件关联（os.startfile）' + (
+            '可用' if hasattr(os, 'startfile') else '不可用')
+    if system == 'darwin':
+        return 'macOS open 命令' + (
+            '可用' if shutil.which('open') else '不可用')
+    found = bool(shutil.which('xdg-open')) if xdg_open is None else bool(xdg_open)
+    return 'Linux xdg-open 命令' + ('可用' if found else '不可用')
+
+
 def parse_version(text):
     match = re.match(r'(\d+(?:\.\d+)*)', str(text or ''))
     return tuple(int(x) for x in match.group(1).split('.')) if match else (0,)
@@ -55,12 +89,14 @@ def check_package(distribution, module, minimum):
     maximum = MAXIMUM_EXCLUSIVE[distribution]
     specification = (distribution + '>=' + '.'.join(map(str, minimum)) +
                      ',<' + '.'.join(map(str, maximum)))
+    upgrade = package_upgrade_command(distribution, specification)
     status = {'name': distribution, 'required': specification,
               'max_exclusive': '.'.join(map(str, maximum)),
               'installed': '', 'ok': False, 'error': '',
-              'upgrade_command': ('./.venv/bin/python -m pip install --upgrade ' +
-                                  "'" + specification + "'"),
-              'install_command': 'sh ./市委大事记.sh install ' + distribution}
+              'upgrade_command': upgrade,
+              'install_command': (
+                  upgrade if sys.platform == 'win32'
+                  else 'sh ./市委大事记.sh install ' + distribution)}
     try:
         # Some distributions ship modules through the system package manager;
         # package metadata may not exist, while imports still work.
@@ -105,19 +141,26 @@ def diagnose(root=ROOT):
                  if 'mips64' in architecture or 'mips64' in dpkg_arch
                  else 'LoongArch（不是 3A4000 的 MIPS64）'
                  if 'loongarch' in architecture or 'loongarch' in dpkg_arch
-                 else '其他架构')
+                 else 'x86-64 / AMD64'
+                 if architecture in ('amd64', 'x86_64') else '其他架构')
     suggestions = []
     if not python_ok:
         suggestions.append('当前 Python 仅可用于打开网页工作台及环境诊断；采集核心要求 Python 3.10+。')
     if not all(p['ok'] for p in packages):
         suggestions.append('请使用匹配当前 Python 的虚拟环境，不建议直接向系统 Python 强制安装 pip 包。')
-        suggestions.append('统一安装不合格依赖：sh ./市委大事记.sh install all（需确认）')
+        if sys.platform == 'win32':
+            suggestions.append(
+                r'Windows 可用 .\.venv\Scripts\python.exe -m pip install -r requirements.txt'
+                ' 更新全部依赖。')
+        else:
+            suggestions.append('统一安装不合格依赖：sh ./市委大事记.sh install all（需确认）')
         for p in packages:
             if not p['ok']:
                 suggestions.append(
                     p['name'] + ' 需要 ' + p['required'] + '；'
                     '单独安装/更新：' + p['install_command'] +
-                    '；等价的虚拟环境命令：' + p['upgrade_command'])
+                    ('' if sys.platform == 'win32'
+                     else '；等价的虚拟环境命令：' + p['upgrade_command']))
     if 'mips64' in architecture or 'mips64' in dpkg_arch:
         suggestions.append('龙芯 3A4000 是 MIPS64，不要安装标记为 x86_64、arm64、loongarch64 的软件包。')
     if not shutil.which('xdg-open') and sys.platform.startswith('linux'):
@@ -125,7 +168,13 @@ def diagnose(root=ROOT):
     if not (root / 'names.txt').exists() and not (root / 'names.xlsx').exists():
         suggestions.append('项目目录未发现 names.txt 或 names.xlsx，请检查是否完整解压了仓库。')
     return {
-        'os': os_release(),
+        'os': os_release() if sys.platform.startswith('linux') else {},
+        'system': sys.platform,
+        'system_name': system_description(),
+        'os_display': (platform.platform()
+                       if not sys.platform.startswith('linux')
+                       else os_release().get('PRETTY_NAME', 'Linux')),
+        'file_open': file_open_description(),
         'machine': architecture,
         'dpkg_arch': dpkg_arch,
         'arch_description': arch_kind,
@@ -142,8 +191,10 @@ def diagnose(root=ROOT):
 
 def format_diagnostics(result):
     lines = [
-        '银河麒麟 / 龙芯 3A4000 环境诊断（只读，不修改系统）',
-        '系统：' + result['os'].get('PRETTY_NAME', '未知'),
+        result.get('system_name', system_description()) +
+        ' 环境诊断（只读，不修改系统）',
+        '系统：' + result.get('os_display',
+                            result['os'].get('PRETTY_NAME', '未知')),
         'CPU 架构：' + result['machine'] + '；软件包架构：' + (result['dpkg_arch'] or '未知'),
         '架构说明：' + result['arch_description'],
         'Python 版本：' + result['python'],
@@ -157,8 +208,8 @@ def format_diagnostics(result):
             (p['installed'] or '未能导入') +
             (('；' + p['error']) if p['error'] else '')
         )
-    lines.append('其他：系统文件打开命令 xdg-open ' +
-                 ('可用' if result['xdg_open'] else '不可用'))
+    lines.append('其他：文件打开方式 ' + result.get(
+        'file_open', file_open_description(xdg_open=result.get('xdg_open'))))
     lines.append('其他：names.txt / names.xlsx ' +
                  ('已找到' if result['has_names'] else '未找到'))
     if result['suggestions']:
@@ -169,7 +220,7 @@ def format_diagnostics(result):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='银河麒麟/龙芯3A4000环境只读诊断')
+    parser = argparse.ArgumentParser(description='Windows / 银河麒麟环境只读诊断')
     parser.add_argument('--root', type=Path, default=ROOT, help='项目目录')
     parser.add_argument('--json', action='store_true', help='输出机器可读的诊断 JSON')
     args = parser.parse_args(argv)
