@@ -722,6 +722,10 @@ def migrate_legacy_columns(ws, base: str) -> None:
         restore(ws.cell(idx, 7), old_h)
         restore(ws.cell(idx, 8), old_i)
         ws._cells.pop((idx, 9), None)
+        if ws.cell(idx, 7).value != old_h[0] or ws.cell(idx, 8).value != old_i[0]:
+            raise RuntimeError(
+                f'旧Excel迁移第{idx}行校验失败：'
+                f'说明={ws.cell(idx, 7).value!r}，事件日期={ws.cell(idx, 8).value!r}')
     ws._cells.pop((1, 9), None)
     ws.cell(1, 7).value = '说明'
     ws.cell(1, 8).value = '事件日期'
