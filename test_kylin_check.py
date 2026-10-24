@@ -10,6 +10,41 @@ import kylin_check as doctor
 
 
 class TestKylinDiagnostics(unittest.TestCase):
+    def test_windows_diagnostics_do_not_claim_kylin_or_need_xdg_open(self):
+        with tempfile.TemporaryDirectory() as folder:
+            fake={'name':'requests','required':'requests>=2.32,<3',
+                  'installed':'2.34.2','ok':True,'error':''}
+            with patch.object(doctor.sys,'platform','win32'), \
+                 patch.object(doctor.platform,'machine',return_value='AMD64'), \
+                 patch.object(doctor.platform,'platform',
+                              return_value='Windows-11-10.0.26100'), \
+                 patch.object(doctor,'check_package',return_value=fake), \
+                 patch.object(doctor,'os_release',
+                              side_effect=AssertionError('not linux')), \
+                 patch.object(doctor.shutil,'which',return_value=None):
+                result=doctor.diagnose(Path(folder))
+                text=doctor.format_diagnostics(result)
+            self.assertIn('Windows 环境诊断',text)
+            self.assertIn('系统：Windows-11-10.0.26100',text)
+            self.assertIn('x86-64 / AMD64',text)
+            self.assertIn('Windows 文件关联',text)
+            self.assertNotIn('银河麒麟 / 龙芯 3A4000 环境诊断',text)
+            self.assertNotIn('文件打开命令 xdg-open',text)
+            self.assertTrue(result['core_ready'])
+
+    def test_windows_dependency_upgrade_command_uses_powershell_syntax(self):
+        with patch.object(doctor.sys,'platform','win32'):
+            upgrade=doctor.package_upgrade_command(
+                'openpyxl','openpyxl>=3.1,<4')
+            self.assertEqual(upgrade,
+                r'.\.venv\Scripts\python.exe -m pip install --upgrade "openpyxl>=3.1,<4"')
+            self.assertEqual(doctor.system_description(), 'Windows')
+        with patch.object(doctor.sys,'platform','linux'):
+            upgrade=doctor.package_upgrade_command(
+                'openpyxl','openpyxl>=3.1,<4')
+            self.assertIn('./.venv/bin/python',upgrade)
+            self.assertEqual(doctor.system_description(), '银河麒麟 / Linux')
+
     def test_version_check(self):
         self.assertEqual(doctor.parse_version('3.1.5'), (3, 1, 5))
         self.assertEqual(doctor.parse_version('2.32.3.post1'), (2, 32, 3))
