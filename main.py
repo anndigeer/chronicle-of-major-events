@@ -686,7 +686,7 @@ def migrate_legacy_columns(ws, base: str) -> None:
         old_g = ws.cell(idx, 7)
         old_note = ws.cell(idx, 8)
         a_url = canonical_news_url(base, get_cell_url(a))
-        old_url = canonical_news_url(base, get_cell_url(old_g, old_g.value))
+        old_url = canonical_news_url(base, get_cell_url(old_g) or old_g.value)
         title = get_cell_title(a)
         if not a_url and old_url:
             if a.data_type == 'f' and title:
@@ -1571,6 +1571,8 @@ def verify_month_output(month: str, excel: Path, output_dir: Path, grace_days: i
             try:
                 if book.sheetnames != ['九江新闻网']:
                     report['errors'].append('Excel必须只有九江新闻网工作表')
+                elif book.active.cell(1, 7).value == '原文链接':
+                    report['errors'].append('Excel还是旧版A:I九列结构，请先运行同步或导出迁移')
                 else:
                     for row in book.active.iter_rows(min_row=2, max_col=8,
                                                      values_only=True):
