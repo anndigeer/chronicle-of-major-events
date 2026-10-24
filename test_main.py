@@ -57,19 +57,19 @@ class TestJjxw(unittest.TestCase):
         self.assertIn('不生成或更新 Word', help_text)
         self.assertIn('缺正文时可能联网', help_text)
         self.assertIn('抓取检查报告.json', help_text)
-        self.assertIn('.\\.venv\\Scripts\\python.exe', help_text)
+        self.assertIn(r'.\\.venv\\Scripts\\python.exe', help_text)
         self.assertNotIn('A/G超链接', help_text)
         # Asking for help must exit before config, network, cache or Excel IO.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             with patch.object(j, 'load_config',
-                              side_effect=AssertionError('config IO')), \\
+                              side_effect=AssertionError('config IO')), \
                  patch.object(j, 'connect_db',
-                              side_effect=AssertionError('database IO')), \\
+                              side_effect=AssertionError('database IO')), \
                  patch.object(j, 'fetch_list',
                               side_effect=AssertionError('network')):
                 output = io.StringIO()
-                with redirect_stdout(output), \\
+                with redirect_stdout(output), \
                      self.assertRaises(SystemExit) as raised:
                     j.main(['--help'], base_dir=root)
                 self.assertEqual(raised.exception.code, 0)
