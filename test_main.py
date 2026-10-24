@@ -1061,8 +1061,8 @@ class TestJjxw(unittest.TestCase):
             ws['E2'] = '排除'
             ws['G2'] = url
             ws['H2'] = '已有人工备注'
-            ws['H2'] = '2026-09-17'
-            ws['H2'].comment = j.Comment('手工核对', '复核人员')
+            ws['I2'] = '2026-09-17'
+            ws['I2'].comment = j.Comment('手工核对', '复核人员')
             ws['A2'].fill = PatternFill('solid', fgColor='FFFF00')
             old.save(p)
             book = j.open_book(p)
@@ -1098,7 +1098,7 @@ class TestJjxw(unittest.TestCase):
             ws['E2'] = '收录'
             ws['G2'] = old_g_url
             ws['H2'] = '历史说明'
-            ws['H2'] = '2026-09-17'
+            ws['I2'] = '2026-09-17'
             path = root / 'news.xlsx'
             book.save(path)
             migrated = j.open_book(path)
