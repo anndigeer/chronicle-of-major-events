@@ -703,6 +703,27 @@ class TestJjxw(unittest.TestCase):
                          ['陈云', '邓永翔', '黄强', '庄兆林',
                           '陈永奇', '黄喜忠'])
 
+    def test_repository_includes_ready_to_use_names_txt(self):
+        """Fresh checkout has a usable tracked roster, no rename step."""
+        repo = Path(j.__file__).resolve().parent
+        names_file = repo / 'names.txt'
+        self.assertTrue(names_file.is_file())
+        self.assertFalse((repo / 'names.example.txt').exists())
+        content = names_file.read_text(encoding='utf-8-sig')
+        expected = j.parse_names_text(content)
+        self.assertGreaterEqual(len(expected), 1)
+        ignored = (repo / '.gitignore').read_text(encoding='utf-8').splitlines()
+        self.assertNotIn('names.txt', [line.strip() for line in ignored])
+        self.assertIn('names.xlsx', [line.strip() for line in ignored])
+        # A clean checkout reads names.txt without generating config.json.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'names.txt').write_text(content, encoding='utf-8')
+            cfg = j.load_config(root / 'config.json', create_missing=False)
+            self.assertEqual(cfg['names_source'], 'names.txt')
+            self.assertEqual(j.get_names(cfg), expected)
+            self.assertFalse((root / 'config.json').exists())
+
     def test_names_file_precedes_config_without_mutating_json(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
