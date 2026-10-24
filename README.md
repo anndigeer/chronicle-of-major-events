@@ -114,6 +114,8 @@ git pull origin main
 .\市委大事记.cmd start --no-browser --port 8765
 ~~~
 
+现在 `check` 会根据实际操作系统显示 **Windows 或银河麒麟/Linux**。Windows 会检查系统文件关联，不再提示缺少 Linux 的 `xdg-open`；Linux 仍会检查 `xdg-open` 是否可用。两边使用同一套依赖版本规则。
+
 若终端已有 `(.venv)`，也可以直接执行 `python webui.py`。正常启动后会显示 `http://127.0.0.1:端口号/`；浏览器没有自动打开时，把这个地址复制到浏览器即可。**终端需要持续运行**，关闭该终端或按 Ctrl+C 会停止网页服务。
 
 需要安装 Git 和 Python **3.10 或以上**（建议 3.12）。以下命令在 **PowerShell** 中执行。可以把 `D:\PythonProjects` 换成自己准备使用的文件夹（需事先创建）。
