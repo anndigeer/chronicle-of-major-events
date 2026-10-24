@@ -99,7 +99,7 @@ def by_url(ws, suffix: str) -> int:
     raise AssertionError('Missing fixture URL suffix: '+suffix)
 
 
-def click_and_wait(page, jobs, label: str, month='2026-09'):
+def click_and_wait(page, jobs, label: str, month='2026-09', expected_code=0):
     """Distinguish a new command from the preceding command's success."""
     prior=jobs.status(month)['job_id']
     page.get_by_role('button', name=label).click()
@@ -107,10 +107,12 @@ def click_and_wait(page, jobs, label: str, month='2026-09'):
     while time.monotonic()<until:
         current=jobs.status(month)
         if current['job_id']>prior and not current['running']:
-            assert current['code']==0, label+' failed:\n'+current['log']
+            assert current['code']==expected_code, (
+                label+' exited unexpectedly: '+str(current['code'])+'\n'+current['log'])
+            expected_text='最近一次成功' if expected_code==0 else '最近一次失败'
             page.wait_for_function(
-                "() => document.getElementById('status').textContent.includes('最近一次成功')",
-                timeout=12000)
+                "text => document.getElementById('status').textContent.includes(text)",
+                arg=expected_text,timeout=12000)
             return
         time.sleep(0.08)
     raise TimeoutError('Timed out waiting for GUI task: '+label)
@@ -173,11 +175,30 @@ def run_browser_test(page, jobs, folder: Path, port: int):
     click_and_wait(page,jobs,'检查 Excel')
     click_and_wait(page,jobs,'检查名单')
     assert '陈云' in page.locator('#log').inner_text()
+
+    # Regression: if every candidate becomes excluded, the obsolete generated
+    # Word must be backed up and removed, not left as a misleading final file.
+    all_excluded=load_workbook(workbook)
+    ws=all_excluded.active
+    for row_id in range(2,ws.max_row+1):
+        ws.cell(row_id,5).value='排除'
+    all_excluded.save(workbook)
+    click_and_wait(page,jobs,'按人工收录/排除重建 Word',expected_code=1)
+    assert not word.exists(), 'Stale Word remained after excluding all news'
+    assert any((results/'备份').glob('市委大事记（2026年9月）_*.docx'))
+    # Recovery: re-include one article without rescraping or losing the cache.
+    recovered=load_workbook(workbook)
+    recovered.active.cell(by_url(recovered.active,'1001.html'),5).value='收录'
+    recovered.save(workbook)
+    click_and_wait(page,jobs,'按人工收录/排除重建 Word')
+    assert article_headings(word)==['陈云主持会议甲']
+    assert load_workbook(workbook).active.max_row==6
     page.screenshot(path=str(ARTIFACTS/'gui-success.png'),full_page=True)
     (ARTIFACTS/'summary.json').write_text(json.dumps({
        'result':'passed','excel_rows':updated.active.max_row,
        'word_articles':report['word_articles'],
        'manual_exclude':True,'manual_include':True,
+       'all_excluded_word_removed':True,'recovery_from_exclusion':True,
        'sync_did_not_change_word':True},ensure_ascii=False,indent=2),encoding='utf-8')
 
 
