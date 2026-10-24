@@ -11,7 +11,7 @@ import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMAND = ROOT / '市委大事记.cmd'
+COMMAND = ROOT / 'Start.cmd'
 
 
 def call(*args):
