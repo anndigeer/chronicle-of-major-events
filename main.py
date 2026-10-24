@@ -1638,29 +1638,101 @@ def verify_month_output(month: str, excel: Path, output_dir: Path, grace_days: i
 
 
 def args_parser():
-    """Keep the user-facing CLI small; tuning lives in config.json."""
+    """Provide concise CLI modes with complete, example-led Chinese help."""
     parser = argparse.ArgumentParser(
-        description='九江新闻网市委大事记：默认采集上个月，Excel/Word保存到results目录',
-        epilog=('示例：python main.py | python main.py 2026-09 | '
-                'python main.py --test | python main.py 2026-09 --export'))
-    parser.add_argument(
+        add_help=False,
+        formatter_class=argparse.RawTextHelpFormatter,
+        description=(
+            '九江新闻网 · 市委大事记采集与整理工具\n'
+            '默认抓取上一个自然月：新闻增量写入同一份 Excel，'
+            '按人工选择重新生成该月 Word。'
+        ),
+        epilog=(
+            '常见操作流程（可直接复制命令）:\n'
+            '  1. 首次采集 2026 年 9 月并导出 Word\n'
+            '     python main.py 2026-09\n'
+            '  2. 同月增量补抓新发布新闻，应用人工收录/排除并重建 Word\n'
+            '     python main.py 2026-09\n'
+            '  3. 只修改了 Excel 的 E 列「收录/排除」或 H 列「事件日期」\n'
+            '     保存并关闭 Excel/Word，然后运行：python main.py 2026-09 --export\n'
+            '  4. 仅增量更新 Excel 和正文缓存，暂不更新 Word\n'
+            '     python main.py 2026-09 --sync\n'
+            '  5. 检查更新后的 Excel、Word 或名单\n'
+            '     python main.py --check-excel\n'
+            '     python main.py 2026-09 --verify\n'
+            '     python main.py --check-names\n'
+            '\n'
+            '参数与保存规则：\n'
+            '  · 不指定 YYYY-MM 时自动处理上一个自然月。\n'
+            '  · 默认向后检查下月前 10 天发布的迟发新闻（config.json 可调整）。\n'
+            '  · --sync 不更新 Word；--export 不刷新网站新闻列表，但缺正文时可能联网。\n'
+            '  · E 列「收录」强制候选收录，「排除」从下一版 Word 剔除；'
+            '两者都不删除 Excel 新闻。\n'
+            '  · H 列是事件日期，B 列是发布日期；A 列标题是唯一新闻原文超链接。\n'
+            '  · 各操作模式互斥，不能把 --sync 和 --export 写在同一条命令里。\n'
+            '  · Excel 及 Word 默认保存在项目 results 目录；--verify '
+            '会写入抓取检查报告.json。\n'
+            '  · Windows PowerShell 中可将 python 替换为 '
+            r'.\.venv\Scripts\python.exe'
+            '（在项目目录中执行）。\n'
+            '  · 本帮助页不联网，不修改 Excel、Word 或数据库。'
+        )
+    )
+    month_group = parser.add_argument_group('目标月份')
+    month_group.add_argument(
         'month', nargs='?', metavar='YYYY-MM',
-        help='目标月份，默认上一个自然月，如 2026-09')
-    operation = parser.add_mutually_exclusive_group()
-    operation.add_argument('--test', action='store_true',
-                           help='运行离线测试，不联网也不创建采集文件')
-    operation.add_argument('--check-names', action='store_true',
-                           help='离线检查生效的人名数量与完整名单，不访问新闻网站')
-    operation.add_argument('--check-excel', action='store_true',
-                           help='离线检查累计Excel各月数量、A/G超链接、重复新闻及日期')
-    operation.add_argument('--update-leaders', action='store_true',
-                           help='联网更新省委、人大、政府、政协领导名单至names.auto.txt')
-    operation.add_argument('--sync', action='store_true',
-                           help='只同步新闻到Excel和正文缓存，不生成Word')
-    operation.add_argument('--export', action='store_true',
-                           help='根据现有Excel与缓存重新生成Word，可补抓缺失正文')
-    operation.add_argument('--verify', action='store_true',
-                           help='离线检查指定月份的Excel和Word是否完整')
+        help='要整理的月份；省略则处理上一个自然月。\n'
+             '示例：python main.py 2026-09'
+    )
+    mode_group = parser.add_argument_group('操作模式（每次至多选一个，不填则采集并导出）')
+    operation = mode_group.add_mutually_exclusive_group()
+    operation.add_argument(
+        '--test', action='store_true',
+        help='运行全部离线回归测试，检查脚本逻辑；不抓取真实新闻，'
+             '不修改现有采集结果。\n'
+             '示例：python main.py --test'
+    )
+    operation.add_argument(
+        '--check-names', action='store_true',
+        help='只读检查当前生效的人名、来源和包含关系；不联网、不修改文件。\n'
+             '示例：python main.py --check-names'
+    )
+    operation.add_argument(
+        '--check-excel', action='store_true',
+        help='只读检查 results/jiujiang_news.xlsx：月份统计、'
+             'A 列超链接、重复新闻、日期及待复核标记；不修改文件。\n'
+             '示例：python main.py --check-excel'
+    )
+    operation.add_argument(
+        '--update-leaders', action='store_true',
+        help='联网更新江西领导页面中省委、人大、政府、政协的人名，'
+             '保存至 names.auto.txt；不采集新闻、不生成 Word。\n'
+             '示例：python main.py --update-leaders'
+    )
+    operation.add_argument(
+        '--sync', action='store_true',
+        help='联网扫描指定月份及迟发窗口，增量追加新新闻至 Excel，'
+             '并抓取/复用正文缓存；不生成或更新 Word。\n'
+             '示例：python main.py 2026-09 --sync'
+    )
+    operation.add_argument(
+        '--export', action='store_true',
+        help='不重新抓取新闻列表；按 Excel 的 E 列收录/排除、'
+             'H 列事件日期及已有正文缓存重建 Word。缺正文时可能联网补抓。\n'
+             '示例：python main.py 2026-09 --export'
+    )
+    operation.add_argument(
+        '--verify', action='store_true',
+        help='离线核验指定月份的 Excel 与 Word 是否齐全、统计篇数及异常；'
+             '生成 results/抓取检查报告.json，不采集新闻。\n'
+             '示例：python main.py 2026-09 --verify'
+    )
+    help_group = parser.add_argument_group('查看帮助')
+    help_group.add_argument(
+        '-h', '--help', action='help',
+        help='显示全部参数说明、运行场景和操作举例，然后退出。\n'
+             '示例：python main.py --help'
+    )
     return parser
 
 
