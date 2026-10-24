@@ -55,6 +55,23 @@ sh ./创建桌面快捷方式.sh
 
 不要下载普通 Windows EXE 或 x86 Linux 程序在 3A4000 上运行。本项目当前**没有**经龙芯 3A4000 原生构建和验证的免 Python `.deb`/独立二进制发行包；如后续需要完全免装依赖的本地程序，应在同型号或兼容的 MIPS64 麒麟环境中完成打包和实机测试。
 
+### GitHub Actions：自动测试图形界面与采集全流程
+
+每次推送 `main`、提交 Pull Request，或在 GitHub 网页手动点击 **Actions → GUI and full-flow CI → Run workflow**，会运行以下自动检查：
+
+| 测试任务 | 主要检查 |
+|---|---|
+| Windows/Linux 离线测试 | Python 3.10、3.12；脚本语法、新闻采集/导出、Excel 数据、人工收录/排除、本机网页服务接口安全 |
+| Chromium 真实浏览器端到端测试 | 用无头 Chromium 打开中文网页工作台，依次点击「增量采集 + 更新 Word」「按人工收录/排除重建 Word」「仅增量同步 Excel」「核验成果」「检查 Excel」「检查名单」 |
+| E2E 数据断言 | 核对实际生成的 XLSX/DOCX、新闻正文、跨月事件日期；确保手动排除消失、手动收录出现、增量新闻不重复、`--sync` 不改 Word |
+| 异常与恢复 | 全部排除时不会保留过期 Word；重新收录后可重新导出；核对生成的 Word 自动备份 |
+
+Chromium E2E 使用**固定模拟新闻网列表和正文**，但是真实调用 `main.py` 的业务函数和 `webui.py` 的本机 HTTP 服务，并真实生成、读取 XLSX/DOCX。它不依赖外部新闻网站的短时可用性，失败时会将截图和运行日志上传到 GitHub Actions 的 **Artifacts → gui-e2e-results**，通常能直接定位是哪一步失败。
+
+测试结果请以 **Actions 页面的任务状态** 为准：绿色成功表示这一套自动测试通过；红色失败时进入对应 Job 展开失败步骤下载日志。单纯把 workflow 文件提交到仓库并**不代表已经通过了 GitHub Actions 测试**。
+
+**架构限制：** GitHub 提供的 `ubuntu-latest`、`windows-latest` 测试环境并非龙芯 3A4000 的 MIPS64 银河麒麟机器。这些测试能够验证浏览器交互、Python 核心逻辑以及生成文件，但**无法替代 3A4000 原机测试**。最终仍需在麒麟机器执行一次 `sh ./启动网页界面.sh`，重点确认该系统的 Python 版本、MIPS64 依赖包、办公软件关联和桌面启动器。
+
 ### 图形界面离线测试
 
 ~~~bash
