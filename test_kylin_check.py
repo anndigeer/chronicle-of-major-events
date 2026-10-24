@@ -17,9 +17,9 @@ class TestKylinDiagnostics(unittest.TestCase):
 
     def test_dependency_range_and_exact_single_package_command(self):
         from types import SimpleNamespace
-        with patch('kylin_check.importlib.import_module',
-                   return_value=SimpleNamespace(__version__='3.0.10')), \
-             patch('importlib.metadata.version', return_value='3.0.10'):
+        with patch('importlib.metadata.version', return_value='3.0.10'), \
+             patch('kylin_check.importlib.import_module',
+                   return_value=SimpleNamespace(__version__='3.0.10')):
             status=doctor.check_package('openpyxl','openpyxl',(3,1))
         self.assertFalse(status['ok'])
         self.assertEqual(status['error'], '版本过低')
@@ -27,9 +27,9 @@ class TestKylinDiagnostics(unittest.TestCase):
         self.assertEqual(status['install_command'],
                          'sh ./市委大事记.sh install openpyxl')
         self.assertIn("'openpyxl>=3.1,<4'", status['upgrade_command'])
-        with patch('kylin_check.importlib.import_module',
-                   return_value=SimpleNamespace(__version__='4.0.0')), \
-             patch('importlib.metadata.version', return_value='4.0.0'):
+        with patch('importlib.metadata.version', return_value='4.0.0'), \
+             patch('kylin_check.importlib.import_module',
+                   return_value=SimpleNamespace(__version__='4.0.0')):
             newer=doctor.check_package('openpyxl','openpyxl',(3,1))
         self.assertFalse(newer['ok'])
         self.assertIn('版本过高', newer['error'])
@@ -82,7 +82,9 @@ class TestKylinDiagnostics(unittest.TestCase):
                  patch.object(doctor, 'check_package',
                               side_effect=lambda d, m, v: {
                                   'name':d, 'installed':'', 'ok':False,
-                                  'required':'1.0','error':'缺少软件包'}), \
+                                  'required':'example>=1,<2','error':'缺少软件包',
+                                  'install_command':'sh ./市委大事记.sh install example',
+                                  'upgrade_command':"./.venv/bin/python -m pip install --upgrade 'example>=1,<2'"}), \
                  patch.object(doctor.shutil, 'which', return_value=None):
                 result=doctor.diagnose(root)
             self.assertIn('MIPS64',result['arch_description'])
