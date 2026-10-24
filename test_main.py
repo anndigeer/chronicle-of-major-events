@@ -57,7 +57,7 @@ class TestJjxw(unittest.TestCase):
         self.assertIn('不生成或更新 Word', help_text)
         self.assertIn('缺正文时可能联网', help_text)
         self.assertIn('抓取检查报告.json', help_text)
-        self.assertIn(r'.\\.venv\\Scripts\\python.exe', help_text)
+        self.assertIn(r'.\.venv\Scripts\python.exe', help_text)
         self.assertNotIn('A/G超链接', help_text)
         # Asking for help must exit before config, network, cache or Excel IO.
         with tempfile.TemporaryDirectory() as directory:
