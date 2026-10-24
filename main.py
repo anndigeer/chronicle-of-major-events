@@ -1163,15 +1163,26 @@ def refresh_book(book, con: sqlite3.Connection, names: list[str], cfg: dict) -> 
             if row[1].value != n['pub_date']:
                 row[1].value = n['pub_date']
             if n['status'] != '成功':
-                row[6].value = n['message']
+                status_note = n['message']
             elif event_day:
-                row[6].value = '事件日期已填写（H列可复核）'
+                status_note = '事件日期已填写（H列可复核）'
             else:
-                row[6].value = '事件日期未确认；跨月新闻请核对后在H列填写'
+                status_note = '事件日期未确认；跨月新闻请核对后在H列填写'
             if invalid_event:
-                row[6].value = 'H列事件日期无效：请填写真实日期 YYYY-MM-DD（已暂停收录）'
+                status_note = 'H列事件日期无效：请填写真实日期 YYYY-MM-DD（已暂停收录）'
             elif choose == 'exclude':
-                row[6].value = '人工排除；' + row[6].value
+                status_note = '人工排除；' + status_note
+            prior_note = norm_space(row[6].value)
+            generated_note = prior_note.startswith((
+                '事件日期已填写', '事件日期未确认', 'H列事件日期无效',
+                'I列事件日期无效', '人工排除；'))
+            # Historical H-column personal remarks have moved to G. Avoid
+            # destroying them on every refresh; column F already shows
+            # the body status, and H holds the reviewable event date.
+            if not prior_note or generated_note or prior_note == n['message']:
+                row[6].value = status_note
+            elif invalid_event and status_note not in prior_note:
+                row[6].value = prior_note + '\n' + status_note
             row[2].alignment = Alignment(horizontal='center')
             row[4].alignment = Alignment(horizontal='center')
             row[5].alignment = Alignment(horizontal='center')
