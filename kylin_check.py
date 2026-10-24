@@ -21,6 +21,13 @@ REQUIRED = (
     ('python-docx', 'docx', (1, 2)),
     ('urllib3', 'urllib3', (1, 26)),
 )
+MAXIMUM_EXCLUSIVE = {
+    'requests': (3,),
+    'beautifulsoup4': (5,),
+    'openpyxl': (4,),
+    'python-docx': (2,),
+    'urllib3': (3,),
+}
 ROOT = Path(__file__).resolve().parent
 
 
@@ -45,8 +52,15 @@ def os_release(path=Path('/etc/os-release')):
 
 
 def check_package(distribution, module, minimum):
-    status = {'name': distribution, 'required': '.'.join(map(str, minimum)),
-              'installed': '', 'ok': False, 'error': ''}
+    maximum = MAXIMUM_EXCLUSIVE[distribution]
+    specification = (distribution + '>=' + '.'.join(map(str, minimum)) +
+                     ',<' + '.'.join(map(str, maximum)))
+    status = {'name': distribution, 'required': specification,
+              'max_exclusive': '.'.join(map(str, maximum)),
+              'installed': '', 'ok': False, 'error': '',
+              'upgrade_command': ('./.venv/bin/python -m pip install --upgrade ' +
+                                  "'" + specification + "'"),
+              'install_command': 'sh ./市委大事记.sh install ' + distribution}
     try:
         # Some distributions ship modules through the system package manager;
         # package metadata may not exist, while imports still work.
@@ -61,9 +75,12 @@ def check_package(distribution, module, minimum):
         if not raw:
             status['error'] = '已检测到模块，但无法确认版本；请人工核对'
         else:
-            status['ok'] = parse_version(raw) >= minimum
-            if not status['ok']:
+            version = parse_version(raw)
+            status['ok'] = minimum <= version < maximum
+            if version < minimum:
                 status['error'] = '版本过低'
+            elif version >= maximum:
+                status['error'] = '版本过高，超出项目支持范围'
     except Exception as exc:
         status['error'] = type(exc).__name__ + ': ' + str(exc)[:140]
     return status
@@ -93,7 +110,14 @@ def diagnose(root=ROOT):
     if not python_ok:
         suggestions.append('当前 Python 仅可用于打开网页工作台及环境诊断；采集核心要求 Python 3.10+。')
     if not all(p['ok'] for p in packages):
-        suggestions.append('检查银河麒麟原生软件源是否包含所需模块；若使用另装的 Python，请确保包安装在同一个解释器下。')
+        suggestions.append('请使用匹配当前 Python 的虚拟环境，不建议直接向系统 Python 强制安装 pip 包。')
+        suggestions.append('统一安装不合格依赖：sh ./市委大事记.sh install all（需确认）')
+        for p in packages:
+            if not p['ok']:
+                suggestions.append(
+                    p['name'] + ' 需要 ' + p['required'] + '；'
+                    '单独安装/更新：' + p['install_command'] +
+                    '；等价的虚拟环境命令：' + p['upgrade_command'])
     if 'mips64' in architecture or 'mips64' in dpkg_arch:
         suggestions.append('龙芯 3A4000 是 MIPS64，不要安装标记为 x86_64、arm64、loongarch64 的软件包。')
     if not shutil.which('xdg-open') and sys.platform.startswith('linux'):
@@ -129,7 +153,7 @@ def format_diagnostics(result):
     for p in result['packages']:
         lines.append(
             '  ' + ('[正常] ' if p['ok'] else '[待处理] ') +
-            p['name'] + ' >= ' + p['required'] + '；当前：' +
+            p['required'] + '；当前：' +
             (p['installed'] or '未能导入') +
             (('；' + p['error']) if p['error'] else '')
         )
