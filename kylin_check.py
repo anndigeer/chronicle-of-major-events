@@ -96,7 +96,7 @@ def check_package(distribution, module, minimum):
               'upgrade_command': upgrade,
               'install_command': (
                   upgrade if sys.platform == 'win32'
-                  else 'sh ./市委大事记.sh install ' + distribution)}
+                  else 'sh ./Start.sh install ' + distribution)}
     try:
         # Some distributions ship modules through the system package manager;
         # package metadata may not exist, while imports still work.
@@ -153,7 +153,7 @@ def diagnose(root=ROOT):
                 r'Windows 可用 .\.venv\Scripts\python.exe -m pip install -r requirements.txt'
                 ' 更新全部依赖。')
         else:
-            suggestions.append('统一安装不合格依赖：sh ./市委大事记.sh install all（需确认）')
+            suggestions.append('统一安装不合格依赖：sh ./Start.sh install all（需确认）')
         for p in packages:
             if not p['ok']:
                 suggestions.append(
