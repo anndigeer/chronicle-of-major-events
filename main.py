@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 from contextlib import contextmanager
+from copy import copy
 import logging
 import os
 import re
@@ -673,18 +674,36 @@ def legacy_link_candidate(note: object) -> str:
 
 
 def migrate_legacy_columns(ws, base: str) -> None:
-    """Convert old A:I to A:H exactly once, keeping links and manual data.
+    """Convert A:I to A:H, retaining manual notes, dates, styles and comments.
 
-    The former G URL is redundant. If it disagrees with the actual A
-    hyperlink, retain it inside a review marker in the former H note;
-    after the physical column deletion, that note becomes G.
+    openpyxl's delete_cols() may drop or shift comments/styles unpredictably.
+    Snapshot H/I *before* deletion and explicitly restore them to G/H.
     """
     if norm_space(ws.cell(1, 7).value) != '原文链接':
         return
+
+    def snapshot(cell):
+        return (
+            cell.value, copy(cell._style), copy(cell.comment),
+            copy(cell.hyperlink), cell.data_type
+        )
+
+    def restore(cell, item):
+        value, style, comment, hyperlink, data_type = item
+        cell.value = value
+        cell._style = style
+        cell.comment = comment
+        cell._hyperlink = hyperlink
+        # For a formula, assigning the text recreates the correct data type.
+        if data_type == 'f' and isinstance(value, str) and value.startswith('='):
+            cell.data_type = 'f'
+
+    saved: list[tuple[int, tuple, tuple]] = []
     for idx in range(2, ws.max_row + 1):
         a = ws.cell(idx, 1)
         old_g = ws.cell(idx, 7)
         old_note = ws.cell(idx, 8)
+        old_event = ws.cell(idx, 9)
         a_url = canonical_news_url(base, get_cell_url(a))
         old_url = canonical_news_url(base, get_cell_url(old_g) or old_g.value)
         title = get_cell_title(a)
@@ -693,10 +712,16 @@ def migrate_legacy_columns(ws, base: str) -> None:
                 a.value = title
             a.hyperlink = old_url
         elif a_url and old_url and a_url != old_url:
-            # Do not discard mismatched source links when removing column G.
             marker = LEGACY_LINK_NOTE + old_url
             old_note.value = (str(old_note.value or '').rstrip() + '\n' + marker).strip()
+        saved.append((idx, snapshot(old_note), snapshot(old_event)))
+
     ws.delete_cols(7, 1)
+    for idx, old_h, old_i in saved:
+        restore(ws.cell(idx, 7), old_h)
+        restore(ws.cell(idx, 8), old_i)
+    # The original I was removed by delete_cols; no residual data belongs
+    # in column I, even when the old workbook had no rows.
     LOG.info('已将旧版Excel从A:I迁移为A:H；原G列原文链接已取消')
 
 
