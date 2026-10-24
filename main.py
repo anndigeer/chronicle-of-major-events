@@ -716,12 +716,15 @@ def migrate_legacy_columns(ws, base: str) -> None:
             old_note.value = (str(old_note.value or '').rstrip() + '\n' + marker).strip()
         saved.append((idx, snapshot(old_note), snapshot(old_event)))
 
-    ws.delete_cols(7, 1)
+    # Shift explicitly instead of delete_cols(7), whose internal cell-moving
+    # behavior has caused H/I data to drift on some Excel workbooks.
     for idx, old_h, old_i in saved:
         restore(ws.cell(idx, 7), old_h)
         restore(ws.cell(idx, 8), old_i)
-    # The original I was removed by delete_cols; no residual data belongs
-    # in column I, even when the old workbook had no rows.
+        ws._cells.pop((idx, 9), None)
+    ws._cells.pop((1, 9), None)
+    ws.cell(1, 7).value = '说明'
+    ws.cell(1, 8).value = '事件日期'
     LOG.info('已将旧版Excel从A:I迁移为A:H；原G列原文链接已取消')
 
 
