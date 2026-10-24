@@ -1313,6 +1313,22 @@ def backup_generated_word(path: Path) -> None:
 
 def build_word(month: str, articles: list[dict], out_dir: Path) -> Path | None:
     if not articles:
+        # Re-exporting a month after all its candidates have been excluded
+        # must not leave last week's generated Word looking current.
+        # Preserve any user-created Word (no generator signature).
+        y, m = map(int, month.split('-'))
+        for suffix in ('', '_自动整理'):
+            candidate = out_dir / f'市委大事记（{y}年{m}月）{suffix}.docx'
+            if not candidate.exists():
+                continue
+            old_document = Document(candidate)
+            if 'jrjj-v2-generated' not in (
+                    old_document.core_properties.keywords or ''):
+                LOG.info('保留人工创建的Word文档：%s', candidate)
+                continue
+            backup_generated_word(candidate)
+            candidate.unlink()
+            LOG.warning('全部候选已排除或不可导出，备份并清理过期自动Word：%s', candidate)
         return None
     y, m = map(int, month.split('-'))
     out_dir.mkdir(parents=True, exist_ok=True)
