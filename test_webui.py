@@ -72,6 +72,8 @@ class TestKylinWebUI(unittest.TestCase):
                     status=json.load(response)
                 self.assertFalse(status['running'])
                 self.assertFalse(status['files']['excel'])
+                self.assertIn('ready',status['environment'])
+                self.assertIn('missing',status['environment'])
                 # Remote websites cannot fire commands without session token.
                 req=Request(origin+'/api/run',data=json.dumps(
                     {'month':'2026-09','mode':'all'}).encode('utf-8'),
