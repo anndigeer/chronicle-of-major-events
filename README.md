@@ -1,5 +1,7 @@
 # 九江新闻网 · 市委大事记整理工具
 
+仓库已附带可直接使用的 `names.txt`（无须从 `names.example.txt` 复制）。
+
 **新闻文章仅采集九江新闻网「九江时政」**；领导人名单另可从大江网江西领导页面自动更新。运行时从公开 JSON 接口获取新闻列表及正文，优先根据本地 `names.xlsx`、其次 `names.txt` 或旧版 `config.json` 中的姓名名单筛选，生成 Excel、Word，使用 SQLite 缓存并对 Word 正文去重。**不采集九江市政府网站**，也不会自动添加外部政要姓名。
 
 ## Windows：在本地电脑运行和测试
@@ -202,16 +204,16 @@ Windows 本地可执行以下**离线、只读**检查：
 会显示“姓名来源：names.xlsx”“生效姓名：N 人”和全部人名。
 该命令**不联网、不创建数据库、不修改 Excel**，建议每次替换 30 多人名单后先运行。
 
-### 仍可用 names.txt 批量粘贴
+### 直接修改自带的 names.txt（无需复制或重命名）
 
-从 Excel 复制一列人名到记事本，保存为 UTF-8 的 names.txt。
-首次可使用以下命令创建空白示例，再修改内容：
+仓库已经直接包含 **`names.txt`**，克隆项目后即可读取，`names.example.txt` 已取消。需要批量修改姓名时，在项目目录运行：
 
 ~~~powershell
-if (-not (Test-Path .\names.txt)) { Copy-Item .\names.example.txt .\names.txt }
 notepad .\names.txt
+.\.venv\Scripts\python.exe main.py --check-names
 ~~~
 
+从 Excel 复制一列人名后，直接粘贴到 `names.txt`，按 UTF-8 保存。
 支持一行一人或“陈云、邓永翔，黄强;陈永奇”这种分隔形式，
 自动跳过空行、注释、姓名表头和重复名字。
 
@@ -220,7 +222,8 @@ notepad .\names.txt
 **人工来源优先级：names.xlsx → names.txt → config.json 原有名单。**
 人工来源三者**不合并**；但会额外加入来自公开页面的 `names.auto.txt`，并去重。两个个人文件同时存在时以 names.xlsx 为准。
 如果优先文件有错误，程序直接提示，不会默默使用旧名单。
-本地 names.xlsx、names.txt 都由 .gitignore 排除，不会随 git pull 覆盖。
+**注意版本管理：** 默认的 `names.txt` 现已纳入 Git 管理；直接修改它会形成 Git 本地修改，后续 `git pull` 若有同名文件更新，可能需要先保存或合并更改。**个人长期维护的 30 多人名单推荐使用 `names.xlsx`**：它优先于 `names.txt` 读取，并继续被 `.gitignore` 忽略，不会随 `git push` 提交。曾经自行创建过 `names.txt` 的旧用户，在首次更新前请先另行备份，以免新仓库中的同名文件造成 `git pull` 冲突。详细处理方式见下文。
+
 银河麒麟/Linux 同样支持。
 
 更换名单后，缓存中的正文无需重新下载：
@@ -231,6 +234,26 @@ notepad .\names.txt
 
 程序按新名单刷新 Excel 的 C/D 列和 Word，保留 E 列人工选择与 H 列事件日期。
 还没有采集时正常运行 python main.py 2026-09。
+
+### 旧用户首次更新：防止本地 names.txt 被覆盖
+
+如果以前根据示例自己创建过 **未被 Git 跟踪** 的 `names.txt`，新版仓库中也有同名文件，直接执行 `git pull` 可能提示 `untracked working tree files would be overwritten`。在 PowerShell 项目目录，先把旧文件备份到仓库目录之外，再移走旧文件、更新仓库，最后按需要合并名单：
+
+~~~powershell
+# 仅旧用户需要；备份到项目上一级目录，避免丢失手工名单
+Copy-Item .\names.txt ..\names-personal-backup.txt
+# 确认备份文件存在后，再继续
+Test-Path ..\names-personal-backup.txt
+
+# 首次处理同名冲突时可先改名，而非删除旧文件
+Rename-Item .\names.txt names.previous.txt
+git pull origin main
+
+# 新的 names.txt 已直接存在。参考备份内容进行人工合并即可。
+notepad .\names.txt
+~~~
+
+建议把私人/长期维护的人名保存为 `names.xlsx`，不会覆盖仓库的默认 `names.txt`。如果已经存在本地修改并且 Git 报冲突，不要强制 `git reset --hard`，先保留人工名单再解决。
 
 ## 从大江网自动更新“省委、人大、政府、政协”领导名单
 
