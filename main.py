@@ -908,6 +908,874 @@ def infer_event_date(title: str, paragraphs: list[str], publication: str,
             if re.search(r'(?:截至|截止(?:到)?|统计至)\s*$', before):
                 continue
             context = lead[match.end():match.end() + 70].split('。', 1)[0]
+            # Dates attached to a journalist receiving or publishing a
+            # report are not actual event dates and never belong in H.
+            reporter_clause = re.search(
+                r'记者.{0,28}(?:获悉|获知|了解到|得知)|'
+                r'(?:记者|通讯员).{0,14}(?:报道|发稿)|(?:消息|通报)称',
+                context[:45])
+            if reporter_clause or (
+                re.search(r'记者\s*
+            # not October 2. Each candidate can only use words occurring
+            # before the *next* full event-date expression.
+            next_date = EVENT_DATE.search(context)
+            if next_date:
+                context = context[:next_date.start()]
+            action = EVENT_ACTION.search(context)
+            if not action:
+                continue
+            if re.search(r'预计|计划|拟于|将于|即将|将|拟',
+                         context[:action.end()]):
+                continue
+            if match.group('relative'):
+                lag = 2 if match.group('relative') in {'前日', '前天'} else 1
+                happened = published - timedelta(days=lag)
+            else:
+                year = int(match.group('year') or published.year)
+                if match.group('relative_month'):
+                    month_start = published.replace(day=1)
+                    if match.group('relative_month') == '上月':
+                        month_start -= timedelta(days=1)
+                    year, mm = month_start.year, month_start.month
+                    dd = int(match.group('relative_day'))
+                else:
+                    mm, dd = int(match.group('month')), int(match.group('day'))
+                    if not match.group('year') and published.month == 1 and mm == 12:
+                        year -= 1
+                try:
+                    happened = date(year, mm, dd)
+                except ValueError:
+                    continue
+            lag = (published - happened).days
+            if 0 <= lag <= max_lag:
+                return happened.isoformat()
+    return ''
+
+
+def crawl(session: requests.Session, con: sqlite3.Connection,
+          known: dict[str, set[str]], cfg: dict, year: int, debug: Path,
+          target_month: str | None = None, *, status: dict | None = None
+          ) -> dict[str, list[News]]:
+    """Scan through the full date window, even when intermediate pages are cached.
+
+    Record completion status instead of silently accepting partial pagination.
+    Every successfully fetched page is committed to SQLite; the caller can
+    persist new Excel rows before reporting a failure.
+    """
+    source = 'jjxw'
+    new = {source: []}
+    window_start, window_end = publication_window(
+        target_month or f'{year}-01', cfg['late_publication_days'])
+    complete = False
+    error = ''
+    last_page_signature: tuple[str, ...] | None = None
+    for page in range(cfg['max_pages']):
+        news, ok = fetch_list(session, page, cfg, debug)
+        if not ok:
+            error = f'新闻网第{page + 1}页请求失败，采集不完整'
+            break
+        if not news:
+            complete = True  # API reached the end of the listing
+            break
+        page_signature = tuple(n.url for n in news)
+        if page_signature == last_page_signature:
+            error = (f'新闻网第{page + 1}页与上一页内容完全相同，'
+                     '分页接口可能未正确翻页，采集不完整')
+            break
+        last_page_signature = page_signature
+        current = [n for n in news if window_start <= n.pub_date <= window_end]
+        count = 0
+        for n in current:
+            if n.url not in known[source]:
+                known[source].add(n.url)
+                new[source].append(n)
+                count += 1
+            upsert_news(con, n)
+        con.commit()
+        LOG.info('第%d页：解析%d条，时间范围内%d条，新%d条',
+                 page + 1, len(news), len(current), count)
+        if all(n.pub_date < window_start for n in news):
+            complete = True  # All records on this page predate the window.
+            break
+        # Never stop simply because pages are already cached: that can skip
+        # unseen articles further down in the target month.
+        if cfg['delay_seconds']:
+            time.sleep(cfg['delay_seconds'])
+    else:
+        error = (f'已达到最大分页数 max_pages={cfg["max_pages"]}，'
+                 '尚未扫描到目标月份之前的记录，结果可能不完整')
+    if status is not None:
+        status['complete'] = complete
+        status['error'] = error
+    if error:
+        LOG.error('%s；已获取的新闻仍可保留在Excel和SQLite中', error)
+    return new
+
+
+def fetch_article_details(session: requests.Session, con: sqlite3.Connection,
+                          cfg: dict, year: int, month: str,
+                          new: dict[str, list[News]], book, scope: str):
+    source = 'jjxw'
+    fresh_urls = {x.url for x in new[source]}
+    manual_urls = set()
+    for row in book[SOURCES[source]['sheet']].iter_rows(min_row=2, max_col=8):
+        url = reconcile_row_link(row, SOURCES[source]['base'], con, source)
+        if selection(row) == 'include' and url:
+            manual_urls.add(url)
+    # Query by full date range so December news published in January is included.
+    start, end = publication_window(month, cfg['late_publication_days'])
+    rows = con.execute(
+        "SELECT * FROM news WHERE source=? AND pub_date>=? AND pub_date<=? "
+        "ORDER BY pub_date DESC", (source, start, end)).fetchall()
+    to_fetch = [
+        n for n in rows if not (n['status'] == '成功' and n['body_json'])
+        and ((scope == 'all' and n['url'] in fresh_urls)
+             or start <= n['pub_date'] <= end
+             or n['url'] in manual_urls)
+    ]
+    LOG.info('需要抓取正文%d篇；成功缓存直接复用', len(to_fetch))
+    for idx, n in enumerate(to_fetch, 1):
+        try:
+            html = fetch_html(session, n['url'], cfg['timeout_seconds'])
+            title, paragraphs, selector = parse_article(html, n['title'])
+            if sum(map(len, paragraphs)) < 65:
+                raise ValueError('正文少于65字，可能是访问限制或页面改版')
+            con.execute(
+                "UPDATE news SET article_title=?,body_json=?,status='成功',message=?,fetched_at=? WHERE url=?",
+                (title, json.dumps(paragraphs, ensure_ascii=False), selector,
+                 datetime.now().isoformat(timespec='seconds'), n['url']))
+            LOG.info('[%d/%d] 正文成功：%s', idx, len(to_fetch), n['title'][:35])
+        except Exception as exc:
+            con.execute("UPDATE news SET status='失败',message=?,fetched_at=? WHERE url=?",
+                        (str(exc)[:300], datetime.now().isoformat(timespec='seconds'), n['url']))
+            LOG.warning('[%d/%d] 正文失败：%s — %s',
+                        idx, len(to_fetch), n['title'][:35], exc)
+        con.commit()
+        if cfg['delay_seconds']:
+            time.sleep(cfg['delay_seconds'])
+
+
+def match_names(title: str, body: str, names: list[str], include_body: bool) -> list[str]:
+    """Match configured names, avoiding substring-only hits inside longer listed names.
+
+    If both 陈云 and 陈云飞 are configured, an occurrence of 陈云 inside
+    陈云飞 does not count as a separate 陈云 mention. A separate occurrence
+    of 陈云 elsewhere in the same article still counts.
+    """
+    target = title + ('\n' + body if include_body else '')
+    unique_names = list(dict.fromkeys(name for name in names if name))
+    occurrences: dict[str, list[tuple[int, int]]] = {}
+    for name in unique_names:
+        spans = []
+        start = 0
+        while True:
+            start = target.find(name, start)
+            if start < 0:
+                break
+            spans.append((start, start + len(name)))
+            start += 1
+        occurrences[name] = spans
+
+    matched = []
+    for name in unique_names:
+        for start, end in occurrences[name]:
+            covered_by_longer_name = any(
+                len(other) > len(name)
+                and other_start <= start and end <= other_end
+                for other, spans in occurrences.items()
+                if len(other) > len(name)
+                for other_start, other_end in spans
+            )
+            if not covered_by_longer_name:
+                matched.append(name)
+                break
+    return matched
+
+
+def refresh_book(book, con: sqlite3.Connection, names: list[str], cfg: dict) -> list[dict]:
+    chosen = []
+    for source in SOURCES:
+        ws = book[SOURCES[source]['sheet']]
+        for i in range(2, ws.max_row + 1):
+            row = [ws.cell(i, k) for k in range(1, 9)]
+            url = reconcile_row_link(row, SOURCES[source]['base'], con, source)
+            if not url:
+                continue
+            n = con.execute('SELECT * FROM news WHERE url=? AND source=?', (url, source)).fetchone()
+            if n is None:
+                continue
+            paras = json.loads(n['body_json'] or '[]')
+            matches = match_names(n['article_title'] or n['title'], '\n'.join(paras), names, cfg['include_body_matches'])
+            choose = selection(row)
+            # Column H: preserve human edits, recalculate machine guesses.
+            # The comment stores our last guess. If the value differs, it
+            # was edited manually and should never be overwritten.
+            event_cell = row[7]
+            raw_event = event_cell.value
+            event_day = (raw_event.strftime('%Y-%m-%d')
+                         if isinstance(raw_event, (date, datetime))
+                         else date_from_text(str(raw_event or '')))
+            auto_marker = 'AUTO_EVENT_DATE:'
+            prev_guess = ''
+            if event_cell.comment:
+                text = event_cell.comment.text
+                if text.startswith(auto_marker):
+                    prev_guess = text[len(auto_marker):].splitlines()[0].strip()
+            if prev_guess:
+                if event_day == prev_guess:
+                    # Still machine-owned: refresh the guess from latest body.
+                    event_day = ''
+                    event_cell.value = None
+                    event_cell.comment = None
+                else:
+                    # User has changed or cleared our suggested date.
+                    event_cell.comment = None
+                    if not event_day:
+                        # Clearing a suggestion explicitly asks for review,
+                        # not automatic regeneration on the same refresh.
+                        event_cell.comment = Comment(
+                            'MANUAL_EVENT_DATE_REVIEW', '人工日期标记')
+            needs_manual_review = bool(
+                event_cell.comment and
+                event_cell.comment.text.startswith('MANUAL_EVENT_DATE_REVIEW'))
+            if needs_manual_review and event_day:
+                # A newly typed valid event date completes the manual review.
+                event_cell.comment = None
+                needs_manual_review = False
+            invalid_event = bool(norm_space(event_cell.value)) and not event_day
+            if not event_day and not needs_manual_review and not invalid_event and n['status'] == '成功':
+                inferred = infer_event_date(
+                    n['article_title'] or n['title'], paras, n['pub_date'],
+                    cfg['late_publication_days'])
+                if inferred:
+                    event_day = inferred
+                    event_cell.value = inferred
+                    event_cell.comment = Comment(
+                        auto_marker + inferred + '\n自动推断，请核实或直接修改单元格。',
+                        '采集程序')
+            effective_day = event_day or n['pub_date']
+            selected = not invalid_event and (choose == 'include' or (choose == 'auto' and bool(matches)))
+            row[2].value = '命中' if matches else ('待正文' if n['status'] != '成功' else '未命中')
+            row[3].value = '、'.join(matches)
+            row[5].value = n['status']
+            # B column is the site's publication date; manually reviewed
+            # event dates belong in column H and must remain untouched.
+            if row[1].value != n['pub_date']:
+                row[1].value = n['pub_date']
+            if n['status'] != '成功':
+                row[6].value = n['message']
+            elif event_day:
+                row[6].value = '事件日期已填写（H列可复核）'
+            else:
+                row[6].value = '事件日期未确认；跨月新闻请核对后在H列填写'
+            if invalid_event:
+                row[6].value = 'H列事件日期无效：请填写真实日期 YYYY-MM-DD（已暂停收录）'
+            elif choose == 'exclude':
+                row[6].value = '人工排除；' + row[6].value
+            row[2].alignment = Alignment(horizontal='center')
+            row[4].alignment = Alignment(horizontal='center')
+            row[5].alignment = Alignment(horizontal='center')
+            if selected:
+                chosen.append({'source': source, 'url': url, 'date': effective_day,
+                               'published': n['pub_date'],
+                               'title': n['article_title'] or n['title'], 'body': paras,
+                               'status': n['status'], 'matches': matches})
+    return chosen
+
+
+def canonical_title(title: str) -> str:
+    return re.sub(r'[\W_]+', '', (title or '').lower())
+
+
+def canonical_body(body: list[str]) -> str:
+    """Ignore layout whitespace and punctuation when comparing full articles."""
+    return re.sub(r'[\W_]+', '', '\n'.join(body).lower())
+
+
+def _similar_article_body(a: str, b: str) -> bool:
+    """Require substantial content overlap to deduplicate equal headlines.
+
+    This prevents two different meetings with the same generic title from
+    being collapsed merely because they were published close together.
+    """
+    if not a or not b:
+        return False
+    if a == b and len(a) >= 65:
+        return True
+    if min(len(a), len(b)) < 100:
+        return False
+    from collections import Counter
+    a_pairs = Counter(a[i:i + 2] for i in range(len(a) - 1))
+    b_pairs = Counter(b[i:i + 2] for i in range(len(b) - 1))
+    if not a_pairs or not b_pairs:
+        return False
+    # Multiset counts keep long repeated phrases weighted correctly.
+    shared = sum((a_pairs & b_pairs).values())
+    total = sum((a_pairs | b_pairs).values())
+    return shared / total >= 0.90
+
+
+def _same_news_story(a: dict, b: dict) -> bool:
+    a_body, b_body = canonical_body(a['body']), canonical_body(b['body'])
+    # Reposting identical substantial body text under a different headline is
+    # still one story, even if publication dates or titles differ.
+    if a_body == b_body and len(a_body) >= 65:
+        return True
+    if canonical_title(a['title']) != canonical_title(b['title']):
+        return False
+    if abs((date.fromisoformat(a['date']) - date.fromisoformat(b['date'])).days) > 2:
+        return False
+    return _similar_article_body(a_body, b_body)
+
+
+def deduplicate_for_month(selected: list[dict], month: str) -> tuple[list[dict], list[dict]]:
+    """Return distinct articles for Word, leaving all source rows in Excel."""
+    articles: list[dict] = []
+    failed: list[dict] = []
+    duplicates = 0
+    eligible = sorted((x for x in selected if x['date'].startswith(month)),
+                      key=lambda x: (x['date'], x['title']))
+    for item in eligible:
+        if item['status'] != '成功' or not item['body']:
+            failed.append(item)
+            continue
+        match_idx = next((i for i, seen in enumerate(articles)
+                          if _same_news_story(seen, item)), None)
+        if match_idx is None:
+            articles.append(item)
+            continue
+        duplicates += 1
+        seen = articles[match_idx]
+        # Keep the longer article among same-source duplicates.
+        if len(canonical_body(item['body'])) > len(canonical_body(seen['body'])):
+            articles[match_idx] = item
+    articles.sort(key=lambda x: (x['date'], x['title']))
+    LOG.info('Word 正文去重：候选正文 %d 篇，合并重复 %d 篇，最终保留 %d 篇',
+             len(eligible) - len(failed), duplicates, len(articles))
+    return articles, failed
+
+
+def set_page_layout(doc):
+    for section in doc.sections:
+        section.page_width, section.page_height = Cm(21), Cm(29.7)
+        section.top_margin, section.bottom_margin = Cm(2.54), Cm(2.54)
+        section.left_margin, section.right_margin = Cm(2.7), Cm(2.7)
+    normal = doc.styles['Normal']
+    normal.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+    normal.paragraph_format.line_spacing = Pt(28)
+    normal.paragraph_format.space_before = normal.paragraph_format.space_after = Pt(0)
+
+
+def add_run(p, text: str, font: str):
+    r = p.add_run(text)
+    r.font.name = font
+    r._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), font)
+    r.font.size = Pt(16)
+    r.font.color.rgb = RGBColor(0, 0, 0)
+    return r
+
+
+def backup_generated_word(path: Path) -> None:
+    """At most one generated Word backup per day; retain last seven.
+
+    Matches only timestamped backups created by the program and never
+    deletes a manually named document.
+    """
+    directory = path.parent / '备份'
+    directory.mkdir(parents=True, exist_ok=True)
+    prefix = f'{path.stem}_'
+    generated = re.compile(
+        re.escape(prefix) + r'\d{8}_\d{6}(?:_\d{6})?\.docx')
+    previous = sorted(
+        (item for item in directory.glob(f'{prefix}*.docx')
+         if item.is_file() and generated.fullmatch(item.name)),
+        key=lambda x: x.name)
+    today = prefix + datetime.now().strftime('%Y%m%d') + '_'
+    if not any(item.name.startswith(today) for item in previous):
+        stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        snapshot = directory / f'{prefix}{stamp}.docx'
+        shutil.copy2(path, snapshot)
+        previous.append(snapshot)
+    for stale in sorted(previous, key=lambda x: x.name)[:-7]:
+        stale.unlink()
+
+
+def build_word(month: str, articles: list[dict], out_dir: Path) -> Path | None:
+    if not articles:
+        return None
+    y, m = map(int, month.split('-'))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f'市委大事记（{y}年{m}月）.docx'
+    if path.exists():
+        existing = Document(path)
+        if 'jrjj-v2-generated' not in (existing.core_properties.keywords or ''):
+            path = out_dir / f'市委大事记（{y}年{m}月）_自动整理.docx'
+        if path.exists():
+            backup_generated_word(path)
+    doc = Document()
+    set_page_layout(doc)
+    doc.core_properties.keywords = 'jrjj-v2-generated'
+    doc.core_properties.title = f'市委大事记（{y}年{m}月）'
+    header = doc.add_paragraph()
+    header.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    header.paragraph_format.space_after = Pt(0)
+    header.paragraph_format.keep_with_next = True
+    h_lvl = OxmlElement('w:outlineLvl')
+    h_lvl.set(qn('w:val'), '0')  # Word outline level 1 (zero-based)
+    header._p.get_or_add_pPr().append(h_lvl)
+    hrun = header.add_run('市 委 大 事 记')
+    hrun.font.name = '方正小标宋简体'
+    hrun._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), '方正小标宋简体')
+    hrun.font.size = Pt(22)
+    subtitle = doc.add_paragraph()
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    subtitle.paragraph_format.space_before = Pt(0)
+    s_lvl = OxmlElement('w:outlineLvl')
+    s_lvl.set(qn('w:val'), '1')  # Word outline level 2 (zero-based)
+    subtitle._p.get_or_add_pPr().append(s_lvl)
+    date_run = subtitle.add_run(f'（{y}年{m}月）')
+    date_run.font.name = '楷体_GB2312'
+    date_run._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), '楷体_GB2312')
+    date_run.font.size = Pt(18)
+    footer = doc.sections[0].footer.paragraphs[0]
+    footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    pnum = footer.add_run()
+    pnum.font.name = '仿宋_GB2312'
+    pnum.font.size = Pt(12)
+    field_start = OxmlElement('w:fldChar')
+    field_start.set(qn('w:fldCharType'), 'begin')
+    field_instr = OxmlElement('w:instrText')
+    field_instr.set(qn('xml:space'), 'preserve')
+    field_instr.text = ' PAGE '
+    field_end = OxmlElement('w:fldChar')
+    field_end.set(qn('w:fldCharType'), 'end')
+    pnum._r.append(field_start)
+    pnum._r.append(field_instr)
+    pnum._r.append(field_end)
+    for article in articles:
+        doc.add_paragraph('')
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        p.paragraph_format.line_spacing = Pt(28)
+        p.paragraph_format.keep_with_next = True
+        add_run(p, article['title'], '黑体')
+        ppr = p._p.get_or_add_pPr()
+        lvl = OxmlElement('w:outlineLvl')
+        lvl.set(qn('w:val'), '2')
+        ppr.append(lvl)
+        for para in article['body']:
+            if not para:
+                continue
+            body = doc.add_paragraph()
+            body.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            body.paragraph_format.first_line_indent = Cm(1.12)
+            body.paragraph_format.line_spacing = Pt(28)
+            add_run(body, para, '仿宋_GB2312')
+    temp = path.with_suffix('.tmp.docx')
+    doc.save(temp)
+    temp.replace(path)
+    return path
+
+
+def audit_excel(path: Path) -> dict:
+    """Read-only validation of the sole A hyperlink and A:H schema."""
+    result = {
+        'file': str(path), 'sheet': '九江新闻网', 'total': 0,
+        'months': {}, 'issues': [], 'issue_count': 0,
+    }
+    if not path.is_file():
+        result['issues'].append('找不到Excel：' + str(path))
+        result['issue_count'] += 1
+        return result
+    try:
+        book = load_workbook(path, read_only=False, data_only=False)
+    except Exception as exc:
+        result['issues'].append(f'Excel无法读取：{exc}')
+        result['issue_count'] += 1
+        return result
+
+    def problem(message):
+        result['issue_count'] += 1
+        if len(result['issues']) < 30:
+            result['issues'].append(message)
+
+    try:
+        if book.sheetnames != ['九江新闻网']:
+            problem('工作表不是唯一的“九江新闻网”：' + '、'.join(book.sheetnames))
+        if '九江新闻网' not in book.sheetnames:
+            return result
+        ws = book['九江新闻网']
+        if norm_space(ws.cell(1, 7).value) == '原文链接':
+            problem('检测到旧版A:I工作表，需运行一次同步或导出迁移为A:H')
+            event_col = 9
+            legacy = True
+        else:
+            event_col = 8
+            legacy = False
+            if [ws.cell(1, i).value for i in range(1, 9)] != HEADERS:
+                problem('表头不是新版A:H结构')
+        seen = {}
+        base = SOURCES['jjxw']['base']
+        for rowno in range(2, ws.max_row + 1):
+            a, b, event = (ws.cell(rowno, n) for n in (1, 2, event_col))
+            if not (a.value or b.value):
+                continue
+            result['total'] += 1
+            if not get_cell_title(a):
+                problem(f'第{rowno}行：A列缺少新闻标题')
+            url = canonical_news_url(base, get_cell_url(a))
+            if not url:
+                problem(f'第{rowno}行：A列没有有效的新闻原文超链接')
+            elif url in seen:
+                problem(f'第{rowno}行：超链接与第{seen[url]}行重复：{url}')
+            else:
+                seen[url] = rowno
+            if legacy:
+                old = canonical_news_url(base, ws.cell(rowno, 7).value)
+                if old and url and old != url:
+                    problem(f'第{rowno}行：旧版A/G超链接冲突；A={url}；旧G={old}')
+            elif legacy_link_candidate(ws.cell(rowno, 7).value):
+                problem(f'第{rowno}行：G列说明中存在历史链接待复核标记')
+            if isinstance(b.value, (date, datetime)):
+                published = b.value.date().isoformat() if isinstance(b.value, datetime) else b.value.isoformat()
+            else:
+                published = date_from_text(str(b.value or ''))
+            if not published:
+                problem(f'第{rowno}行：B列发布日期缺失或无效')
+            else:
+                month = published[:7]
+                result['months'][month] = result['months'].get(month, 0) + 1
+            if event.value not in (None, ''):
+                if isinstance(event.value, (date, datetime)):
+                    event_day = event.value.date().isoformat() if isinstance(event.value, datetime) else event.value.isoformat()
+                else:
+                    event_day = date_from_text(str(event.value))
+                if not event_day:
+                    problem(f'第{rowno}行：{("I" if legacy else "H")}列事件日期无效：{event.value}')
+    finally:
+        book.close()
+    result['months'] = dict(sorted(result['months'].items()))
+    return result
+
+
+def show_excel_audit(path: Path) -> int:
+    """Display cumulative monthly counts and anomalies without changing files."""
+    report = audit_excel(path)
+    print(f'检查文件：{path}')
+    print(f'累计新闻：{report["total"]} 条')
+    print('按发布日期统计：')
+    for month, count in report['months'].items():
+        print(f'  {month}：{count} 条')
+    if not report['months']:
+        print('  暂无有效发布日期记录')
+    print(f'异常：{report["issue_count"]} 项')
+    for problem in report['issues']:
+        print('  - ' + problem)
+    if report['issue_count'] > len(report['issues']):
+        print(f'  ...还有{report["issue_count"] - len(report["issues"])}项未显示')
+    return 1 if report['issue_count'] else 0
+
+
+def write_link_review_report(conflicts: list[dict], path: Path) -> None:
+    """Write one replaceable UTF-8 CSV without changing any Excel cells."""
+    if not conflicts:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+            mode='w', prefix='.link-review-', suffix='.csv',
+            encoding='utf-8-sig', newline='', dir=path.parent,
+            delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            writer = csv.writer(handle)
+            writer.writerow(['Excel行号', '新闻标题', 'A列实际超链接',
+                             'G列原文链接', '需人工复核的原因'])
+            for issue in conflicts:
+                # Titles are untrusted web text; do not let Excel interpret
+                # a leading formula prefix when opening this CSV.
+                title = str(issue['title'])
+                if title.lstrip().startswith(('=', '+', '-', '@')):
+                    title = "'" + title
+                writer.writerow([issue['row'], title,
+                                 issue['a_url'], issue['g_url'], issue['reason']])
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    LOG.warning('有%d行原文链接冲突未能安全修复，详见：%s', len(conflicts), path)
+
+
+def backup_spreadsheet(path: Path) -> None:
+    """Keep one pre-run snapshot per day and only seven automatic Excel backups.
+
+    Never delete files that do not match this program's autogenerated filename.
+    """
+    if not path.exists():
+        return
+    backups = path.parent / '备份'
+    backups.mkdir(parents=True, exist_ok=True)
+    prefix = f'{path.stem}_运行前_'
+    pattern = re.compile(
+        re.escape(prefix) + r'\d{8}_\d{6}_\d{6}' + re.escape(path.suffix))
+    snapshots = sorted(
+        (item for item in backups.glob(f'{prefix}*{path.suffix}')
+         if item.is_file() and pattern.fullmatch(item.name)),
+        key=lambda item: item.name)
+    today = prefix + datetime.now().strftime('%Y%m%d') + '_'
+    if any(item.name.startswith(today) for item in snapshots):
+        LOG.info('今天已有Excel运行前备份，跳过重复备份')
+    else:
+        stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        dest = backups / f'{prefix}{stamp}{path.suffix}'
+        shutil.copy2(path, dest)
+        snapshots.append(dest)
+        LOG.info('运行前Excel备份：%s', dest)
+    for old in sorted(snapshots, key=lambda item: item.name)[:-7]:
+        old.unlink()
+        LOG.info('清理超出最近7份的自动Excel备份：%s', old)
+
+
+def previous_month(today: date | None = None) -> str:
+    today = today or date.today()
+    return (today.replace(day=1) - timedelta(days=1)).strftime('%Y-%m')
+
+
+def verify_month_output(month: str, excel: Path, output_dir: Path, grace_days: int = 10) -> int:
+    """Verify monthly output without network or database writes."""
+    start, end = publication_window(month, grace_days)
+    report = {
+        'month': month, 'source': '九江新闻网', 'news': 0,
+        'matched': 0, 'late_candidates': 0, 'late_confirmed': 0,
+        'word_articles': 0, 'errors': [],
+    }
+    if not excel.exists():
+        report['errors'].append('缺少Excel文件')
+    else:
+        try:
+            book = load_workbook(excel, read_only=True)
+            try:
+                if book.sheetnames != ['九江新闻网']:
+                    report['errors'].append('Excel必须只有九江新闻网工作表')
+                else:
+                    for row in book.active.iter_rows(min_row=2, max_col=8,
+                                                     values_only=True):
+                        if not row[0]:
+                            continue
+                        pub = str(row[1] or '')
+                        if not start <= pub <= end:
+                            continue  # Existing workbook can also contain other months.
+                        report['news'] += 1
+                        if not pub.startswith(month):
+                            report['late_candidates'] += 1
+                            if str(row[7] or '').startswith(month):
+                                report['late_confirmed'] += 1
+                        if row[2] == '命中':
+                            report['matched'] += 1
+            finally:
+                book.close()
+        except Exception as exc:
+            report['errors'].append(f'Excel读取失败：{exc}')
+    if not report['news']:
+        report['errors'].append('没有新闻网新闻')
+    if (output_dir / '链接冲突待复核.csv').is_file():
+        report['errors'].append('仍有链接冲突待人工复核，请检查results/链接冲突待复核.csv')
+    year, month_number = map(int, month.split('-'))
+    words = list(output_dir.glob(
+        f'市委大事记（{year}年{month_number}月）*.docx')) if output_dir.exists() else []
+    if not words:
+        report['errors'].append('没有生成指定月份Word')
+    for path in words:
+        try:
+            doc = Document(path)
+            report['word_articles'] += sum(
+                bool(p._p.xpath('./w:pPr/w:outlineLvl')) for p in doc.paragraphs)
+        except Exception as exc:
+            report['errors'].append(f'Word读取失败：{path.name} — {exc}')
+    if not report['word_articles']:
+        report['errors'].append('Word没有新闻正文')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / '抓取检查报告.json').write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+    LOG.info('导出验证：%s', json.dumps(report, ensure_ascii=False))
+    return 1 if report['errors'] else 0
+
+
+def args_parser():
+    """Keep the user-facing CLI small; tuning lives in config.json."""
+    parser = argparse.ArgumentParser(
+        description='九江新闻网市委大事记：默认采集上个月，Excel/Word保存到results目录',
+        epilog=('示例：python main.py | python main.py 2026-09 | '
+                'python main.py --test | python main.py 2026-09 --export'))
+    parser.add_argument(
+        'month', nargs='?', metavar='YYYY-MM',
+        help='目标月份，默认上一个自然月，如 2026-09')
+    operation = parser.add_mutually_exclusive_group()
+    operation.add_argument('--test', action='store_true',
+                           help='运行离线测试，不联网也不创建采集文件')
+    operation.add_argument('--check-names', action='store_true',
+                           help='离线检查生效的人名数量与完整名单，不访问新闻网站')
+    operation.add_argument('--check-excel', action='store_true',
+                           help='离线检查累计Excel各月数量、A/G超链接、重复新闻及日期')
+    operation.add_argument('--update-leaders', action='store_true',
+                           help='联网更新省委、人大、政府、政协领导名单至names.auto.txt')
+    operation.add_argument('--sync', action='store_true',
+                           help='只同步新闻到Excel和正文缓存，不生成Word')
+    operation.add_argument('--export', action='store_true',
+                           help='根据现有Excel与缓存重新生成Word，可补抓缺失正文')
+    operation.add_argument('--verify', action='store_true',
+                           help='离线检查指定月份的Excel和Word是否完整')
+    return parser
+
+
+def main(argv=None, *, base_dir: Path | None = None) -> int:
+    args = args_parser().parse_args(argv)
+    # Resolve paths relative to this script, not the terminal's current directory.
+    # base_dir is an internal test seam, not an extra command-line option.
+    root = Path(base_dir) if base_dir is not None else Path(__file__).resolve().parent
+    if args.test:
+        import subprocess
+        return subprocess.call(
+            [sys.executable, '-m', 'unittest', '-v', 'test_main'], cwd=root)
+    if args.update_leaders:
+        # Separate workflow from news collection; errors retain the old file.
+        try:
+            groups, updated = update_leaders(root)
+        except Exception as exc:
+            print(f'领导名单更新失败：{exc}', file=sys.stderr)
+            return 1
+        for section, people in groups.items():
+            print(f'{section}：{len(people)} 人 — ' + '、'.join(people))
+        print(f'已保存至 {root / AUTO_NAMES_FILE}' if updated
+              else '名单未变化，无需覆盖已有文件')
+        print('合计去重人数：' +
+              str(len({name for vals in groups.values() for name in vals})))
+        return 0
+    if args.check_excel:
+        return show_excel_audit(root / 'results' / 'jiujiang_news.xlsx')
+    if args.check_names:
+        # Read-only: no network, no SQLite/Excel outputs or config creation.
+        cfg = load_config(root / 'config.json', create_missing=False)
+        names = get_names(cfg)
+        print(f'姓名来源：{cfg["names_source"]}')
+        print(f'生效姓名：{len(names)} 人')
+        snapshot = root / AUTO_NAMES_FILE
+        if (snapshot.is_file() and
+                '初始网页快照' in snapshot.read_text(encoding='utf-8-sig').splitlines()[0]):
+            print('提醒：当前 names.auto.txt 为网页缓存快照，尚未通过实时抓取复核。')
+        for i, name in enumerate(names, 1):
+            print(f'{i:>2}. {name}')
+        overlaps = [(short, long) for short in names for long in names
+                    if short != long and short in long]
+        if overlaps:
+            print('注意：名单中存在姓名包含关系；若短姓名只出现在长姓名内部，'
+                  '不会单独计为命中：')
+            for short, long in overlaps:
+                print(f'  {short} ⊂ {long}')
+        return 0
+
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s',
+                        datefmt='%H:%M:%S')
+    month = args.month or previous_month()
+    if not re.fullmatch(r'20\d{2}-(0[1-9]|1[0-2])', month):
+        args_parser().error('月份格式错误，请输入 YYYY-MM，例如 2026-09')
+
+    results = root / 'results'
+    excel = results / 'jiujiang_news.xlsx'
+    database = results / 'jiujiang_cache.sqlite3'
+    debug_dir = results / 'debug_html'
+
+    if args.verify:
+        return verify_month_output(month, excel, results, load_config(root / 'config.json')['late_publication_days'])
+
+    mode = 'sync' if args.sync else 'export' if args.export else 'all'
+    cfg = load_config(root / 'config.json')
+    year = int(month[:4])
+    results.mkdir(parents=True, exist_ok=True)
+
+    LOG.info('目标月份：%s；延后%d天检索；发布日期范围：%s 至 %s；模式：%s；输出目录：%s',
+             month, cfg['late_publication_days'],
+             *publication_window(month, cfg['late_publication_days']), mode, results)
+    backup_spreadsheet(excel)
+    book = open_book(excel)
+    with connect_db(database) as con:
+        link_conflicts = []
+        existing = existing_rows(book, con, link_conflicts)
+        write_link_review_report(link_conflicts, results / '链接冲突待复核.csv')
+        session = build_session(cfg['user_agent'])
+        new = {source: [] for source in SOURCES}
+        if mode != 'export':
+            # Scan the complete month + grace window, then preserve pages even
+            # if a later API request fails. Do not issue a misleading Word.
+            crawl_status = {}
+            new = crawl(session, con, existing, cfg, year, debug_dir, month,
+                        status=crawl_status)
+            write_new_rows(book, new)
+            save_book_atomic(book, excel)
+            if crawl_status.get('complete') is False:
+                LOG.error('本次采集不完整：%s。已保存Excel和缓存，请稍后重试。',
+                          crawl_status.get('error', '未知分页错误'))
+                return 1
+            fetch_article_details(session, con, cfg, year, month, new, book, 'month')
+        else:
+            # Reuse cached news and honor manual selection in column E.
+            fetch_article_details(session, con, cfg, year, month, new, book, 'month')
+
+        names = get_names(cfg)
+        selected = refresh_book(book, con, names, cfg)
+        save_book_atomic(book, excel)
+        LOG.info('Excel已更新：%s；配置姓名 %d 人', excel, len(names))
+        if mode != 'sync':
+            chosen, failed = deduplicate_for_month(selected, month)
+            word = build_word(month, chosen, results)
+            if word:
+                LOG.info('Word已生成：%s（%d篇，正文去重）', word, len(chosen))
+            else:
+                LOG.error('该月份没有成功提取并满足筛选条件的正文，未生成Word；请检查日期、名单和采集日志')
+            if failed:
+                LOG.error('有%d篇已选新闻正文未抓取成功，Word可能缺少文章；下次将重试', len(failed))
+            if not word or failed:
+                return 1  # Do not report a complete monthly export.
+    if link_conflicts:
+        LOG.error('仍有%d行A/G链接待人工复核，详见results/链接冲突待复核.csv；'
+                  '本次结果不标记为完整成功', len(link_conflicts))
+        return 1
+    LOG.info('完成。输出文件位于：%s', results)
+    return 0
+
+
+def configure_cli_encoding() -> None:
+    """Make Chinese terminal output safe in Windows CI and redirected consoles.
+
+    Some Windows environments default to cp1252. Setting the encoding before
+    argparse handles --help prevents UnicodeEncodeError without requiring the
+    caller to manually change the system code page.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            try:
+                stream.reconfigure(encoding='utf-8', errors='backslashreplace')
+            except (OSError, ValueError):
+                pass
+
+
+if __name__ == '__main__':
+    configure_cli_encoding()
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        LOG.error('用户中断；已落盘的缓存、Excel仍被保留')
+        sys.exit(130)
+    except PermissionError as exc:
+        LOG.error('文件被占用，请先关闭 Excel/Word 再运行：%s', exc)
+        sys.exit(2)
+, before) and
+                re.search(r'获悉|得知|了解到', context[:30])
+            ):
+                continue
             # "10月2日记者获悉，9月30日召开会议" means September 30,
             # not October 2. Each candidate can only use words occurring
             # before the *next* full event-date expression.
