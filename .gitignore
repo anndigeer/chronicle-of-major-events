@@ -20,7 +20,6 @@ debug_html/
 .DS_Store
 Thumbs.db
 results/
-# Local name list; keep personal edits across git pull
-names.txt
-# Local spreadsheet of names, not committed
+# names.txt is the tracked default roster distributed with the project.
+# Keep private, user-specific names in names.xlsx instead (takes precedence).
 names.xlsx
