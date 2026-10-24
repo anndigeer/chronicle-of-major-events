@@ -35,6 +35,59 @@ class TestJjxw(unittest.TestCase):
                 j.main(['2026-13'], base_dir=Path(folder))
             self.assertFalse((Path(folder) / 'results').exists())
 
+    def test_help_explains_every_mode_with_examples_and_side_effects(self):
+        import io
+        from contextlib import redirect_stdout
+        parser = j.args_parser()
+        help_text = parser.format_help()
+        self.assertIn('常见操作流程', help_text)
+        self.assertIn('目标月份', help_text)
+        self.assertIn('操作模式', help_text)
+        self.assertIn('参数与保存规则', help_text)
+        for option in ('--help', '--test', '--check-names', '--check-excel',
+                       '--update-leaders', '--sync', '--export', '--verify'):
+            with self.subTest(option=option):
+                self.assertIn(option, help_text)
+                self.assertIn('python main.py ' + option
+                              if option not in ('--sync', '--export', '--verify')
+                              else 'python main.py 2026-09 ' + option,
+                              help_text)
+        self.assertIn('E 列', help_text)
+        self.assertIn('H 列', help_text)
+        self.assertIn('不生成或更新 Word', help_text)
+        self.assertIn('缺正文时可能联网', help_text)
+        self.assertIn('抓取检查报告.json', help_text)
+        self.assertIn('.\\.venv\\Scripts\\python.exe', help_text)
+        self.assertNotIn('A/G超链接', help_text)
+        # Asking for help must exit before config, network, cache or Excel IO.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(j, 'load_config',
+                              side_effect=AssertionError('config IO')), \\
+                 patch.object(j, 'connect_db',
+                              side_effect=AssertionError('database IO')), \\
+                 patch.object(j, 'fetch_list',
+                              side_effect=AssertionError('network')):
+                output = io.StringIO()
+                with redirect_stdout(output), \\
+                     self.assertRaises(SystemExit) as raised:
+                    j.main(['--help'], base_dir=root)
+                self.assertEqual(raised.exception.code, 0)
+                self.assertIn('python main.py 2026-09 --export',
+                              output.getvalue())
+                self.assertEqual(list(root.iterdir()), [])
+
+    def test_help_short_option_and_mutually_exclusive_modes(self):
+        parser = j.args_parser()
+        with self.assertRaises(SystemExit) as caught:
+            parser.parse_args(['-h'])
+        self.assertEqual(caught.exception.code, 0)
+        self.assertTrue(parser.parse_args(['2026-09', '--sync']).sync)
+        self.assertTrue(parser.parse_args(['--export', '2026-09']).export)
+        with self.assertRaises(SystemExit) as caught:
+            parser.parse_args(['2026-09', '--sync', '--export'])
+        self.assertNotEqual(caught.exception.code, 0)
+
     def test_no_args_defaults_to_previous_month_and_results_dir(self):
         with tempfile.TemporaryDirectory() as folder:
             p = Path(folder)
