@@ -281,8 +281,13 @@ def launch(argv=None, *, root=None, open_browser=True):
         parser.error('端口范围必须为 0～65535')
     token=secrets.token_urlsafe(24)
     jobs=Jobs(root or ROOT)
+    platform_label = ('Windows · 仅在本机浏览器访问'
+                      if sys.platform == 'win32'
+                      else '银河麒麟 / 龙芯 3A4000 · 仅在本机浏览器访问')
+    page = PAGE.replace('__TOKEN__', token).replace(
+        '银河麒麟 / 龙芯 3A4000 · 仅在本机浏览器访问', platform_label)
     handler=type('ChronicleHandler',(LocalHandler,),
-                 {'jobs':jobs,'token':token,'page':PAGE.replace('__TOKEN__',token)})
+                 {'jobs':jobs,'token':token,'page':page})
     server=ThreadingHTTPServer(('127.0.0.1',args.port),handler)
     url='http://127.0.0.1:'+str(server.server_port)+'/'
     print('已启动市委大事记网页操作台：'+url,flush=True)
