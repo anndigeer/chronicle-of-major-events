@@ -38,6 +38,9 @@ jobs:
         run: python -m compileall -q main.py webui.py test_main.py test_webui.py tests
       - name: Run isolated CLI and GUI tests
         run: python -m unittest discover -p 'test_*.py' -v
+      - name: Smoke-test Windows PowerShell/CMD GUI launcher
+        if: runner.os == 'Windows'
+        run: python tests/windows_cmd_smoke.py
 
   kylin-legacy-python:
     name: Kylin diagnostics-only GUI (Python ${{ matrix.python }})
