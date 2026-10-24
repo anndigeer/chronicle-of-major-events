@@ -1746,7 +1746,8 @@ def main(argv=None, *, base_dir: Path | None = None) -> int:
     if args.test:
         import subprocess
         return subprocess.call(
-            [sys.executable, '-m', 'unittest', '-v', 'test_main'], cwd=root)
+            [sys.executable, '-m', 'unittest', 'discover',
+             '-p', 'test_*.py', '-v'], cwd=root)
     if args.update_leaders:
         # Separate workflow from news collection; errors retain the old file.
         try:
