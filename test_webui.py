@@ -25,6 +25,30 @@ class TestKylinWebUI(unittest.TestCase):
             with self.assertRaises(ValueError):
                 worker.start('2026-09','shell')
 
+    def test_diagnosis_can_run_even_when_scraper_is_unavailable(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d:
+            fake = {
+                'python_ok': False, 'python':'3.8.0', 'core_ready': False,
+                'arch_description': 'MIPS64',
+                'packages': [{'name':'python-docx','ok':False}],
+            }
+            with patch.object(webui,'diagnose',return_value=fake):
+                jobs=webui.Jobs(Path(d),sys.executable)
+            self.assertFalse(jobs.status('2026-09')['environment']['ready'])
+            with self.assertRaises(RuntimeError):
+                jobs.start('2026-09','sync')
+            jobs.start('2026-09','diagnose')
+            for _ in range(150):
+                if not jobs.status('2026-09')['running']:
+                    break
+                time.sleep(0.02)
+            state=jobs.status('2026-09')
+            self.assertEqual(state['code'],0)
+            self.assertIn('环境诊断',state['log'])
+            self.assertEqual(state['job_id'],1)
+            self.assertFalse((Path(d)/'results').exists())
+
     def test_process_uses_exact_mode_and_runs_once(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d)
