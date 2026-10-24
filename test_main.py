@@ -477,6 +477,71 @@ class TestJjxw(unittest.TestCase):
             self.assertEqual(j.main(['2026-09', '--export'], base_dir=p), 1)
             self.assertFalse(list((p / 'results').glob('*.docx')))
 
+    def test_repeated_export_applies_manual_exclusions_and_clears_stale_word(self):
+        """Re-export must rebuild from E choices; no stale generated Word."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            results = root / 'results'
+            results.mkdir()
+            excel = results / 'jiujiang_news.xlsx'
+            wb = j.open_book(excel)
+            ws = wb.active
+            with j.connect_db(results / 'jiujiang_cache.sqlite3') as con:
+                for index, (title, body) in enumerate([
+                    ('会议甲', '9月18日，市委主持召开会议甲并部署相关工作。' * 8),
+                    ('会议乙', '9月19日，市委开展项目乙调研并研究相关事项。' * 8)
+                ], 2):
+                    url = f'https://www.jjxw.cn/article/2026/09/20/{index}.html'
+                    ws.cell(index, 1, title).hyperlink = url
+                    ws.cell(index, 2, '2026-09-20')
+                    ws.cell(index, 5, '收录')
+                    con.execute(
+                        "INSERT INTO news(url,source,title,pub_date,article_title,body_json,status) "
+                        "VALUES(?,?,?,?,?,?,?)",
+                        (url, 'jjxw', title, '2026-09-20', title,
+                         json.dumps([body], ensure_ascii=False), '成功'))
+            j.save_book_atomic(wb, excel)
+            word = results / '市委大事记（2026年9月）.docx'
+            with patch.object(j, 'fetch_html',
+                              side_effect=AssertionError('must use offline cache')):
+                self.assertEqual(j.main(['2026-09', '--export'], base_dir=root), 0)
+                self.assertTrue(word.exists())
+                self.assertIn('会议乙', '\n'.join(p.text for p in Document(word).paragraphs))
+                # Exclude only one article, without removing its Excel/cache record.
+                wb = load_workbook(excel)
+                wb.active['E3'] = '排除'
+                wb.save(excel)
+                self.assertEqual(j.main(['2026-09', '--export'], base_dir=root), 0)
+                content = '\n'.join(p.text for p in Document(word).paragraphs)
+                self.assertIn('会议甲', content)
+                self.assertNotIn('会议乙', content)
+                self.assertEqual(load_workbook(excel).active['E3'].value, '排除')
+                # Now exclude the last item; generated old Word must disappear.
+                wb = load_workbook(excel)
+                wb.active['E2'] = '排除'
+                wb.save(excel)
+                self.assertEqual(j.main(['2026-09', '--export'], base_dir=root), 1)
+            self.assertFalse(word.exists())
+            self.assertTrue(list((results / '备份').glob(
+                '市委大事记（2026年9月）_*.docx')))
+            self.assertEqual(load_workbook(excel).active['E2'].value, '排除')
+            self.assertEqual(load_workbook(excel).active['E3'].value, '排除')
+            with j.connect_db(results / 'jiujiang_cache.sqlite3') as con:
+                self.assertEqual(con.execute(
+                    "SELECT count(*) FROM news WHERE source='jjxw'").fetchone()[0], 2)
+
+    def test_empty_export_never_removes_user_authored_word(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            path = root / '市委大事记（2026年9月）.docx'
+            doc = Document()
+            doc.add_paragraph('人工编写的内容')
+            doc.save(path)
+            self.assertIsNone(j.build_word('2026-09', [], root))
+            self.assertTrue(path.exists())
+            self.assertIn('人工编写的内容',
+                          '\n'.join(p.text for p in Document(path).paragraphs))
+
     def test_failed_selected_body_marks_partial_export(self):
         with tempfile.TemporaryDirectory() as folder:
             p = Path(folder)
